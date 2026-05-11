@@ -35,7 +35,9 @@ static void DetachHooks (void)
 {
   g_print ("Detaching hooks\n");
 
+  gum_interceptor_begin_transaction (interceptor);
   gum_interceptor_detach (interceptor, listener);
+  gum_interceptor_end_transaction (interceptor);
 
   g_object_unref (user32);
   g_object_unref (listener);
