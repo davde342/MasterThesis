@@ -35,3 +35,37 @@ vcpkg-manifest-install.log
 
 .DS_Store
 Thumbs.db
+
+DIBRIS_CS_MSc_Thesis_Template/
+
+# LaTeX
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.pdf
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*.run.xml
+*.bcf
+*.glg
+*.glo
+*.gls
+*.ist
+*.acn
+*.acr
+*.alg
+*.nlo
+*.nls
+*.ilg
+*.ind
+*.idx
+*.pdfsync
+*.snm
+*.nav
+*.vrb
