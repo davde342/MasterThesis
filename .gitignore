@@ -5,6 +5,7 @@ build_compilation_commands.txt
 /build-*/
 /out/
 /bin/
+images/
 
 
 CMakeCache.txt
@@ -47,7 +48,6 @@ DIBRIS_CS_MSc_Thesis_Template/
 *.toc
 *.lof
 *.lot
-*.pdf
 *.synctex.gz
 *.fdb_latexmk
 *.fls
