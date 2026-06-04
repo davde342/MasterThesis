@@ -176,18 +176,16 @@ void DetachHooks() {
         g_HooksAttached = false;
 
         while (true) {
-            // 1. Wait for all threads currently known to be in the hooks to exit
+            // Wait for all threads currently known to be in the hooks to exit
             while (g_ActiveHooks.load() > 0) {
                 SwitchToThread();
             }
 
-            // 2. Grace period: allow any thread de-scheduled in the tiny window 
+            // This period allows any thread de-scheduled in the tiny window 
             // (after the detour jump but before the atomic increment or
             //  after the atomic decrement but before hook function epilogue) to wake up and run.
             Sleep(1000);
 
-            // 3. Re-check the counter. If a thread woke up and incremented the counter 
-            // during the sleep, we must loop back and wait for it to finish.
             if (g_ActiveHooks.load() == 0) {
                 break;
             }
