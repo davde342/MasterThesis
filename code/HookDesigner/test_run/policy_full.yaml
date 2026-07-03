@@ -1,0 +1,142 @@
+configure:
+  paradigm: inline_hook
+  engines:
+    - detours
+    - frida
+  process: scada_engine.exe
+  logic_file: "policy_logic.cpp"
+ 
+hooks:
+  - module: scada_engine.exe
+    function_name: ParseProprietaryPacket
+    address_resolution:
+      strategy: offset
+      rva_offset: "0x1000"
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - packetBuffer
+          - complexityWeight
+          - result
+      security_policy:
+        pre_hook: SharedPacketPreHook
+ 
+  - module: scada_engine.exe
+    function_name: ParseProprietaryPacket2
+    address_resolution:
+      strategy: offset
+      rva_offset: "0x1000"
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - packetBuffer
+          - complexityWeight
+          - result
+      security_policy:
+        pre_hook: SharedPacketPreHook
+ 
+  - module: scada_engine.exe
+    function_name: LogTaskResult
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - taskId
+          - status
+          - result
+      security_policy:
+        pre_hook: GenericEnterLog
+        post_hook: LogTaskResult_post
+ 
+  - module: scada_engine.exe
+    function_name: ProcessCommandSignal
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - cmdId
+          - payloadValue
+          - result
+      security_policy:
+        pre_hook: ProcessCommandSignal_pre
+        post_hook: ProcessCommandSignal_post
+ 
+  - module: scada_engine.exe
+    function_name: UpdateSensor
+    address_resolution:
+      strategy: offset
+      rva_offset: "0x1000"
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - id
+          - val
+          - result
+      security_policy:
+        pre_hook: SharedDoubleAction_pre
+ 
+  - module: scada_engine.exe
+    function_name: CalibrateDevice
+    address_resolution:
+      strategy: offset
+      rva_offset: "0x1000"
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - id
+          - val
+          - result
+      security_policy:
+        pre_hook: SharedDoubleAction_pre
+ 
+  - module: scada_engine.exe
+    function_name: ProcessDataPoint
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - dp
+          - result
+      security_policy:
+        pre_hook: ProcessDataPoint_pre
+ 
+  - module: scada_engine.exe
+    function_name: PerformCriticalTask
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - taskID
+      security_policy:
+        pre_hook: PerformCriticalTask_pre
+
+  - module: scada_engine.exe
+    function_name: ProcessNestedSignal
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        execution_time: true
+      runtime_monitoring:
+        log_arguments:
+          - ppValue

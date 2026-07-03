@@ -1,0 +1,21 @@
+inline_hook:
+  detours:
+    template: "detours_template.cpp"
+    cast_format: "(True{name}_t)"
+    libs_arg: "detours_lib"
+    inc_arg: "detours_include"
+    extra_libs:
+      - "User32.lib"
+      - "Advapi32.lib"
+
+  frida:
+    template: "frida_template.cpp"
+    cast_format: "(gpointer)"
+    libs_arg: "frida_lib"
+    inc_arg: "frida_include"
+    extra_libs:
+      - "User32.lib"
+      - "Advapi32.lib"
+      - "Ole32.lib"
+      - "Shell32.lib"
+

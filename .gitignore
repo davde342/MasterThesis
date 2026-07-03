@@ -1,12 +1,24 @@
 build_compilation_commands.txt
 
-
 /build/
 /build-*/
 /out/
 /bin/
 images/
-
+scratch/
+venv/
+.venv/
+env/
+ENV/
+*.venv
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+.env
+run_tests.py
 
 CMakeCache.txt
 CMakeFiles/
