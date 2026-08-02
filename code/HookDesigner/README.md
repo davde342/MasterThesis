@@ -14,6 +14,7 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
    - [SCADA Engine Simulator (`scada_engine.cpp`)](#scada-engine-simulator-scada_enginecpp)
    - [Template System](#template-system)
 3. [Policy YAML Schema](#policy-yaml-schema)
+   - [Telemetry & Metrics Performance Guidelines](#telemetry--metrics-performance-guidelines)
 4. [Template Architecture](#template-architecture)
 5. [Hooking Engine Abstraction](#hooking-engine-abstraction)
 6. [Build & Usage Guide](#build--usage-guide)
@@ -110,6 +111,16 @@ The transpiler supports three mutually exclusive operational modes:
 
 3. **Separation of policy from logic**: The YAML policy specifies *what* to hook and *which behaviors* to apply, while the C++ logic file specifies *how* (the actual callback implementations). This separation allow user to write C++ code in a usual code editor with syntax highlighting/intellisense enabled. It also enables the same logic file to be reused across different policies and engines.
 
+4. **Sensible Defaults with an Escape Hatch (Telemetry Expressions & Pointer Dereferencing)**:
+   - **Sensible Defaults**: In telemetry conditions and log format strings, referencing standalone parameter variables (e.g., `input_paramName`) automatically generates type-safe memory reads using `ReadPointer(...)` or `(uintptr_t)(...)` based on type analysis. Policy authors do not need to write `ReadPointer` or dereference primitives manually for standalone parameters.
+   - **Escape Hatch & Member Access**: Policy authors can write arbitrary C++ expressions, custom local variables (declared in `pre_hook` / `post_hook`), address-of operators, or explicit C++ casts. 
+   
+   > [!IMPORTANT]
+   > **Member Access Requires Manual Safety:** When accessing struct or class fields through pointers (e.g., `input_pStruct->field`), the transpiler detects member access (`->` or `.`) and **bypasses automatic pointer dereferencing**. In this case, automatic crash protection is not applied, so **the policy author must explicitly handle memory safety manually** (e.g., by wrapping the member path in `ReadPointer(...)` as in `ReadPointer(input_pStruct->field)` or verifying non-null pointers).
+
+
+
+
 ---
 
 ### Injector (`injector.cpp`)
@@ -199,20 +210,155 @@ A list of hook definitions. Each hook specifies a target function and its associ
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `performance_metrics` | `object` | `{}` | Performance measurement configuration. |
-| `runtime_monitoring` | `object` | `{}` | Argument and return value logging configuration. |
+| `log_rules` | `list[object]` | `[]` | Logging rules configuration. |
 | `security_policy` | `object` | `{}` | Pre-hook and post-hook callback configuration. |
 
 ##### `performance_metrics`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `execution_time` | `bool` | `false` | If `true`, measure hook latency using `QueryPerformanceCounter` and include it in log output. |
+| `execution_time` | `bool` | `false` | If `true`, measure hook latency using `QueryPerformanceCounter`. |
+| `counters` | `list[object]` | `[]` | List of Prometheus counter metric definitions. |
+| `gauges` | `list[object]` | `[]` | List of Prometheus gauge metric definitions. |
+| `histograms` | `list[object]` | `[]` | List of Prometheus histogram metric definitions. |
 
-##### `runtime_monitoring`
+###### Metric Objects (`counters`, `gauges`, `histograms`)
+
+Each metric item defined inside `counters`, `gauges`, or `histograms` supports the following schema:
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `name` | `string` | **Yes** | — | Unique metric name identifier within the hook. |
+| `description` | `string` | No | `""` | Help string / description for the Prometheus metric family. |
+| `condition` | `string` | No | `"true"` | Boolean C++ telemetry expression evaluated to determine if the metric is updated. |
+| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `latency`, `input_<param>`, `output_<param>`, `__hook_result`, or global variable). |
+| `buckets` | `list[float]` | No (**Histograms**) | `[0.001, 0.005, ...]` | Upper bounds for histogram buckets. Default is `[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0]`. Must be a non-empty, strictly increasing list of positive numbers. |
+| `label` | `dict[string, string]` | No | `{}` | Key-value dictionary specifying dynamic Prometheus label mapping (e.g. `{ label_key: "expression" }`). At most 1 dynamic label per metric is allowed. |
+
+###### Metric Configuration Example
+
+```yaml
+performance_metrics:
+  execution_time: true
+  counters:
+    - name: "cs_enter_total"
+      description: "Total EnterCriticalSection calls"
+    - name: "wait_single_failed_total"
+      description: "Wait failures"
+      condition: "__hook_result == WAIT_FAILED"
+  gauges:
+    - name: "cs_active_depth"
+      description: "Current active threads holding critical sections"
+      value: "g_cs_active_depth.load()"
+  histograms:
+    - name: "cs_enter_wait_time"
+      description: "Distribution of critical section acquisition wait times"
+      value: "latency"
+      buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+```
+
+##### `log_rules`
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `log_arguments` | `list[string]` | `[]` | List of parameter names (and/or `"result"`) to capture and log. Values are captured both before and after the original function call; if a value was mutated, both the original and mutated values are logged with an arrow notation (`value -> new_value`). |
+| `name` | `string` | `"rule_N"` | Name identifier for the log rule (auto-generated as `rule_1`, `rule_2`, etc. if omitted). |
+| `condition` | `string` | `"true"` | Boolean C++ telemetry expression evaluated to determine if log fires. |
+| `level` | `string` | `"info"` | Log level (`trace`, `debug`, `info`, `warn`, `error`, `critical`). |
+| `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or `__hook_result` to capture for auto-generated format strings. |
+| `format` | `string` | `null` | Custom format string supporting placeholders (`{tid}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`). |
+
+###### Ways to Specify `log_rules`
+
+1. **Empty / Default Rule (`- {}`)**
+   Uses full defaults (`name: rule_1`, `level: info`, `condition: true`, auto-generated format string):
+   ```yaml
+   log_rules:
+     - {}
+   ```
+   *Generated Log Message:* `"[HOOK FunctionName] [rule_1] called"`
+
+2. **Auto-Generated Format String with Arguments**
+   Specifies variables to log while letting the transpiler construct the format string automatically:
+   ```yaml
+   log_rules:
+     - name: "log_args"
+       level: "info"
+       arguments:
+         - input_lpSubKey
+         - input_dwOptions
+   ```
+   *Generated Log Message:* `"[HOOK FunctionName] [log_args] | input_lpSubKey={input_lpSubKey} | input_dwOptions={input_dwOptions}"`
+
+3. **Custom Format String with Placeholders**
+   Defines an explicit log message format using placeholders like `{tid}`, `{__hook_result}`, `{input_<param>}`, or `{output_<param>}` (with optional C++ format specifiers like `:x`):
+   ```yaml
+   log_rules:
+     - name: "reg_open_failed"
+       condition: "__hook_result != 0"
+       level: "warn"
+       format: "[WARN] RegOpenKeyExA FAILED | key=\"{input_lpSubKey}\" access=0x{input_samDesired:x} error={__hook_result}"
+   ```
+
+4. **Multiple Conditional Rules**
+   Attach multiple log rules with distinct conditions, levels, and formatters to a single hook:
+   ```yaml
+   log_rules:
+     - name: "on_success"
+       condition: "__hook_result == 0"
+       level: "debug"
+       arguments:
+         - input_lpSubKey
+     - name: "on_failure"
+       condition: "__hook_result != 0"
+       level: "error"
+       format: "[ERROR] Failed to open key '{input_lpSubKey}' with code {__hook_result}"
+   ```
+
+5. **No Logging (Omitted or Empty List)**
+   Omit `log_rules` entirely or set it to `[]`:
+   ```yaml
+   behaviors:
+     log_rules: []
+   ```
+   *Behavior:* No log rules will be transpiled for this hook.
+
+###### Validation Constraints for `log_rules`
+
+The transpiler validates all `log_rules` in `process_log_rules` and will raise a `ValueError` if any of the following constraints are violated:
+
+- **Dictionary Structure**: Each item in `log_rules` must be a YAML object (`dict`).
+- **Unique Rule Names**: Rule names must be unique within the same hook. Auto-generated names (`rule_1`, `rule_2`) respect this constraint.
+- **Allowed Log Levels**: `level` must be one of: `trace`, `debug`, `info`, `warn`, `error`, or `critical`.
+- **Mutual Exclusion (`arguments` vs `format`)**: A rule **cannot** specify both `arguments` and `format`. Use `arguments` for auto-generated format strings, or `format` for custom log formatting.
+- **Argument List Rules**:
+  - `arguments` must be a list of strings.
+  - Arguments within a single rule must be unique (no duplicate parameter names).
+  - Every argument name must start with `input_` or `output_` matching a valid function parameter (e.g. `input_lpSubKey`), or be `__hook_result`.
+- **Format String Placeholders**: Placeholders inside `format` strings can reference:
+  - `{tid}` (Thread ID)
+  - `{latency}` (Execution time in milliseconds)
+  - `{__hook_result}` (Return value of the hooked function)
+  - `{input_<param>}` or `{output_<param>}` (Target function parameters)
+  - Custom C++ expressions, struct fields (e.g. `{input_pStruct->field}`), or local variables declared in `pre_hook` / `post_hook` callbacks.
+  - Placeholders support C++ format specifiers following a colon (e.g., `{input_samDesired:x}`).
+- **Telemetry Requirement**: If `log_rules` are present on any hook, top-level `configure.telemetry` must be configured (e.g., `logger: spdlog`).
+
+#### Telemetry & Metrics Performance Guidelines
+
+When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-path hooked functions (e.g., `EnterCriticalSection`, `ReadFile`, `WaitForSingleObject`), adhere to the following best practices:
+
+1. **Validation & Low-Cardinality Metric Labels**:
+   - Avoid using high-cardinality dynamic variables (such as thread IDs `{tid}`, pointer addresses `{input_buf_ptr}`, or timestamps) inside Prometheus metric label expressions.
+   - Prometheus best practices explicitly state: *“Labels should only be used for low-cardinality dimensions (e.g. HTTP status codes, error types, method names).”* High-cardinality values belong in **logs**, not metric labels.
+
+2. **Thread-Local / Direct Metric Caching**:
+   - For hooks with dynamic low-cardinality labels, HookDesigner automatically utilizes a `thread_local static` metric cache (`ThreadLocalMetricCache` / `ThreadLocalHistogramCache`).
+   - The first invocation for a given label set fetches the metric reference from `prometheus::Family::Add()`, while subsequent calls on the same thread bypass Prometheus's internal `std::mutex` lock, achieving near zero-cost updates on the hot path.
+
+3. **Promote Label-less Counters for Hot Paths**:
+   - For extremely high-frequency functions, prefer label-less counters. Label-less metrics use direct global references (`g_PromMetric_->Increment()`) which perform lock-free atomic updates (`std::atomic<double>`) in under 5 nanoseconds.
+
+---
 
 ##### `security_policy`
 
@@ -221,7 +367,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 | `pre_hook` | `string \| null` | `null` | Name of the pre-hook callback function (called *before* the original function). Must be tagged with `// @<name>-start` in the logic file. |
 | `post_hook` | `string \| null` | `null` | Name of the post-hook callback function (called *after* the original function). Must be tagged with `// @<name>-start` in the logic file. |
 
-Pre-hook and post-hook callback parameters are automatically extracted from the logic file via `libclang`. The transpiler validates that each callback parameter name matches a parameter of the target function (post-hooks may additionally reference `result`).
+Pre-hook and post-hook callback parameters are automatically extracted from the logic file via `libclang`. The transpiler validates that each callback parameter name matches a parameter of the target function. Policy authors can use the `__hook_result` wildcard in telemetry conditions and log format strings (e.g. `{__hook_result}`) to reference the return value returned from non-void target functions.
 
 ### Complete Example
 
@@ -243,11 +389,11 @@ hooks:
     behaviors:
       performance_metrics:
         execution_time: true
-      runtime_monitoring:
-        log_arguments:
-          - packetBuffer
-          - complexityWeight
-          - result
+      log_rules:
+        - arguments:
+            - packetBuffer
+            - complexityWeight
+            - result
       security_policy:
         pre_hook: SharedPacketPreHook
 
@@ -256,16 +402,16 @@ hooks:
     address_resolution:
       strategy: export
     behaviors:
-      runtime_monitoring:
-        log_arguments:
-          - taskId
-          - status
+      log_rules:
+        - arguments:
+            - taskId
+            - status
       security_policy:
         pre_hook: GenericEnterLog
         post_hook: LogTaskResult_post
 ```
 
----
+
 
 ## Template Architecture
 
@@ -278,7 +424,7 @@ The template system uses Jinja2's `{% include %}` mechanism to compose engine-sp
 The Detours template. Generates a complete DLL source file that:
 
 - Includes Windows headers and `<detours.h>`.
-- Defines the `HookGuard` RAII struct for tracking in-flight hook executions.
+- Defines the `HookActiveThreads` RAII struct for tracking in-flight hook executions.
 - Includes `_user_logic_helpers.cpp` (which itself `#include`s the user's logic file).
 - For each hook: generates a `typedef` for the original function pointer type, a static `True<FunctionName>` pointer, and a `Hooked<FunctionName>` function that includes `_hook_body.cpp`.
 - Implements `EnlistAllThreads()` to enumerate process threads for Detours' thread-update mechanism.
@@ -288,13 +434,13 @@ The Detours template. Generates a complete DLL source file that:
 
 #### `frida_template.cpp`
 
-The top-level Frida-Gum template. Structurally parallel to the Detours template, but uses Frida APIs:
+The top-level Frida-Gum template. Structurally parallel to the Detours template, but utilizes Frida-Gum APIs:
 
 - Includes `"frida-gum.h"`.
-- Omits `HookGuard` (Frida handles it automatically).
-- Uses `gum_interceptor_replace()` / `gum_interceptor_revert()` equivalent to `DetourAttach` / `DetourDetach`.
+- Uses `gum_interceptor_replace()` for standard returning functions and `gum_interceptor_replace_fast()` for non-returning functions (`is_noreturn: true`).
+- Conditionally uses `HookActiveThreads` RAII counter for non-returning functions to track active execution without interfering with Frida's invocation stack.
 - `InitializeHooks()` calls `gum_init_embedded()` and obtains a `GumInterceptor`.
-- `DeinitializeHooks()` calls `gum_interceptor_flush()` to drain in-flight calls, then `gum_deinit_embedded()`.
+- `DeinitializeHooks()` uses a dual ejection check (`gum_interceptor_flush()` + `g_ActiveHooks.load() == 0`) before unreferencing the interceptor and calling `gum_deinit_embedded()`.
 
 #### `_hook_body.cpp` (Shared Partial)
 
@@ -304,7 +450,7 @@ Generates the body of each `Hooked<FunctionName>` function. This is included onc
 2. **Performance timing start**: If `execution_time` is enabled, queries `QueryPerformanceCounter`.
 3. **Pre-hook invocation**: If a `pre_hook` is defined, calls `RunPreLogic_<name>(...)`.
 4. **Original function call**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result`.
-5. **Post-hook invocation**: If a `post_hook` is defined, calls `RunPostLogic_<name>(...)`, passing parameters and/or `__hook_result`.
+5. **Post-hook invocation**: If a `post_hook` is defined, calls the post-hook function, passing target function parameters.
 6. **Performance timing end**: Computes elapsed milliseconds, if specified.
 7. **Argument capture on exit**: Re-captures logged arguments to detect mutations.
 8. **Telemetry output**: Builds a log line with thread ID, argument values (showing `original -> mutated` for changed values), and latency.
@@ -315,12 +461,10 @@ Generates the body of each `Hooked<FunctionName>` function. This is included onc
 Provides utility functions and SEH-protected wrappers included at the top of every generated file:
 
 - `#include "{{ logic_file_rel }}"` — includes the user's logic file.
-- `CopyStringImpl` / `CopyString` — SEH-protected string copy to safely read potentially invalid `char*` pointers.
-- `ReadPointerImpl` / `ReadPointer` — SEH-protected templated pointer dereference. Returns a fallback value if the pointer is null or points to invalid memory.
-- `LogSEHException` — logs SEH exception details without using C++ objects (to comply with MSVC's restriction on mixing `__try`/`__except` with C++ destructors).
-- `RunPreLogic_<name>` / `RunPostLogic_<name>` — Generated for each unique pre/post hook. Wraps the user's callback in a `__try`/`__except` block to catch access violations or other exceptions during user logic execution, preventing crashes in the target process.
+- `CopyString` — string copy helper to safely inspect `char*` pointers.
+- `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null.
 
-The template uses Jinja2 sets (`{% set generated_pre_hooks = [] %}`) to track already-generated wrappers and avoid duplicate definitions when the same hook callback is shared across multiple target functions.
+User callbacks (`pre_hook` and `post_hook`) are invoked directly within the `try { ... } catch (...)` exception blocks in `_hook_body.cpp` without wrapper indirection.
 
 #### `_dllmain.cpp` (Shared Partial)
 
@@ -344,7 +488,7 @@ Each `hook` object within `hooks` contains the fields from the YAML schema plus 
 
 | Field | Description |
 |----------------|-------------|
-| `parameters` | List of parameter dicts with `type`, `name`, `pointer_depth`, `underlying_type`, `is_char_ptr`, `safe_read_expr` |
+| `parameters` | List of parameter dicts with `type`, `name`, `pointer_depth`, `underlying_type`, `is_char_ptr`, `is_deref`, `safe_read_expr`, `safe_type` |
 | `return_type` | C++ return type string |
 | `calling_convention` | Detected calling convention if specified (e.g., `"__stdcall"`, `""`) |
 | `address_resolution_cpp` | Generated C++ expression for resolving the function address |
@@ -389,6 +533,40 @@ inline_hook:
 | `libs_arg` | Yes | Name of the CLI argument providing the engine's static library path (maps to `argparse` attribute) |
 | `inc_arg` | Yes | Name of the CLI argument providing the engine's include directory (maps to `argparse` attribute) |
 | `extra_libs` | No (default `[]`) | Additional Windows `.lib` files to link (validated against `^[a-z0-9_\-\.]+\.lib$`) |
+
+
+### Frida Attaching Modes & Thread Synchronization
+
+HookDesigner supports dual Frida-Gum attaching modes based on the function return behavior specified in the YAML policy (`is_noreturn`):
+
+#### 1. Standard Attaching Mode (`gum_interceptor_replace`)
+- **Target Functions**: Standard functions that return to the caller (`is_noreturn: false`).
+- **Mechanism**: Calls `gum_interceptor_replace(interceptor, target, replacement, nullptr, &original)`. Frida wraps execution with its full invocation listener/trampoline infrastructure.
+- **Ejection Tracking**: Frida's native `gum_interceptor_flush(interceptor)` tracks active invocation frames on Frida's internal stack. During `DeinitializeHooks()`, calling `gum_interceptor_flush()` ensures all in-flight calls exit before unloading the DLL.
+
+#### 2. Fast Attaching Mode (`gum_interceptor_replace_fast`)
+- **Target Functions**: Non-returning functions marked with `is_noreturn: true` (e.g., `RaiseException`, `ExitProcess`, `longjmp`).
+- **Mechanism**: Calls `gum_interceptor_replace_fast(interceptor, target, replacement, &original)`. Frida emits a direct inline jump to the hook wrapper without the overhead of Frida's invocation stack wrapper.
+- **Use Case**: Eliminates latency for critical non-returning calls and prevents Frida's call-stack unwinding wrappers from being corrupted by functions that never return.
+
+#### Hybrid Active Thread Synchronization (`HookActiveThreads`)
+
+Because `gum_interceptor_replace_fast` bypasses Frida's native invocation stack wrappers, Frida's `gum_interceptor_flush()` alone cannot detect when threads are executing inside pre-hook logic for non-returning functions.
+
+To solve this, HookDesigner implements a **hybrid RAII thread tracking pattern**:
+- **Selective Declaration**: `HookActiveThreads` and `g_ActiveHooks` are declared conditionally in `_user_logic_helpers.cpp` (`need_active_counter = (engine == 'detours') or has_noreturn`).
+- **Selective Guard Instantiation**: Inside `Hooked<FunctionName>`, `HookActiveThreads hook_active_threads;` is instantiated **only** for `is_noreturn: true` hooks when targeting Frida (and for all hooks when targeting Detours). Standard returning Frida hooks incur **zero thread-counter overhead**.
+- **Disarm on Delegate**: Prior to invoking the original non-returning function (`True<FunctionName>(...)`), `hook_active_threads.Release()` explicitly decrements `g_ActiveHooks--`. If an exception or early return occurs during pre-logic, the RAII destructor automatically fires to decrement `g_ActiveHooks--`.
+- **Dual Ejection Check**: In `DeinitializeHooks()`, when non-returning functions are present (`has_noreturn`), the flush loop waits for **both** `gum_interceptor_flush(interceptor)` AND `g_ActiveHooks.load() == 0`:
+  ```cpp
+  while (GetTickCount() - start < 2000) {
+      if (gum_interceptor_flush(interceptor) && g_ActiveHooks.load() == 0) {
+          g_Ejected = true;
+          break;
+      }
+      Sleep(50);
+  }
+  ```
 
 
 ## Build & Usage Guide

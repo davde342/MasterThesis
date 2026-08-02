@@ -1,97 +1,80 @@
+{% set need_active_counter = (engine == 'detours') or has_noreturn %}
+
+static DWORD g_TlsIndex = TLS_OUT_OF_INDEXES;
+
+// RAII helper to prevent recursive hook execution on the same thread
+struct RecursionHookGuard {
+    bool active;
+    RecursionHookGuard() : active(true) { TlsSetValue(g_TlsIndex, (LPVOID)1); }
+    ~RecursionHookGuard() { if (active) TlsSetValue(g_TlsIndex, (LPVOID)0); }
+    void Release() {
+        if (active) {
+            TlsSetValue(g_TlsIndex, (LPVOID)0);
+            active = false;
+        }
+    }
+};
+
+{% if need_active_counter %}
+static std::atomic<int> g_ActiveHooks{0};
+
+// RAII helper to track active hook execution count
+struct HookActiveThreads {
+    bool active;
+    HookActiveThreads() : active(true) { g_ActiveHooks++; }
+    ~HookActiveThreads() { if (active) g_ActiveHooks--; }
+    void Release() {
+        if (active) {
+            g_ActiveHooks--;
+            active = false;
+        }
+    }
+};
+{% endif %}
+
 #include "{{ logic_file_rel }}"
 
-// Inner helper under SEH protection to copy string without instantiating C++ objects
-static bool CopyStringImpl(const char* source, char* dest, size_t maxChars) {
-    __try {
-        for (size_t i = 0; i < maxChars; ++i) {
-            char c = source[i];
-            dest[i] = c;
-            if (c == '\0') {
-                return true;
-            }
-        }
-        dest[maxChars] = '\0';
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-// copy wrapper with std::string allocation
+// Copy string safely using SIMD strnlen (memory violations will be caught by outer /EHa catch(...))
 static std::string CopyString(const char* source, size_t maxChars = 128) {
     if (!source) {
         return "null";
     }
-    std::vector<char> buffer(maxChars + 1, 0);
-    if (CopyStringImpl(source, buffer.data(), maxChars)) {
-        return std::string(buffer.data());
-    }
-    return "<INVALID_MEMORY>";
+    size_t len = strnlen(source, maxChars);
+    return std::string(source, len);
 }
 
-// Inner helper under SEH protection to dereference pointer without instantiating C++ objects
-template <typename T>
-static bool ReadPointerImpl(const T* ptr, T& outVal) {
-    __try {
-        outVal = *ptr;
-        return true;
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        return false;
-    }
-}
-
-// Outer read wrapper
+// Dereference pointer safely (memory violations will be caught by outer catch(...))
 template <typename T>
 static T ReadPointer(const T* ptr, T fallback = T()) {
     if (!ptr) {
         return fallback;
     }
-    T val = fallback;
-    if (ReadPointerImpl(ptr, val)) {
-        return val;
-    }
-    return fallback;
+    return *ptr;
 }
 
-// Helper to log SEH exceptions to avoid C2712 compiler errors in __try/__except functions
-static void LogSEHException(const char* logicName, const char* functionName, DWORD exceptionCode) {
-    std::ostringstream ss;
-    ss << "[CRITICAL SCADA HOOK] SEH Exception 0x" << std::hex << exceptionCode << std::dec 
-       << " caught in " << logicName << " of " << functionName << std::endl;
-    std::cerr << ss.str();
-}
+// Enlist all thread handles to suspend/resume during transaction operations
+static std::vector<HANDLE> EnlistAllThreads() {
+    std::vector<HANDLE> threadHandles;
+    DWORD currentProcessId = GetCurrentProcessId();
+    DWORD currentThreadId = GetCurrentThreadId();
 
-// Using set for avoiding double definition in case of shared pre/post logic
-{% set generated_pre_hooks = [] %}
-{% set generated_post_hooks = [] %}
-{% for hook in hooks %}
-{% if hook.behaviors.security_policy.pre_hook and hook.behaviors.security_policy.pre_hook not in generated_pre_hooks %}
-{% set _ = generated_pre_hooks.append(hook.behaviors.security_policy.pre_hook) %}
-bool RunPreLogic_{{ hook.behaviors.security_policy.pre_hook }}({%- for param in hook.behaviors.security_policy.pre_hook_params -%}{{ param.type }} {{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%}) {
-    __try {
-        {{ hook.behaviors.security_policy.pre_hook }}({%- for param in hook.behaviors.security_policy.pre_hook_params -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
-        return true;
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        return threadHandles;
     }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        LogSEHException("pre_logic", "{{ hook.behaviors.security_policy.pre_hook }}", GetExceptionCode());
-        return false;
-    }
-}
-{% endif %}
 
-{% if hook.behaviors.security_policy.post_hook and hook.behaviors.security_policy.post_hook not in generated_post_hooks %}
-{% set _ = generated_post_hooks.append(hook.behaviors.security_policy.post_hook) %}
-bool RunPostLogic_{{ hook.behaviors.security_policy.post_hook }}({%- for param in hook.behaviors.security_policy.post_hook_params -%}{{ param.type }} {{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%}) {
-    __try {
-        {{ hook.behaviors.security_policy.post_hook }}({%- for param in hook.behaviors.security_policy.post_hook_params -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
-        return true;
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnapshot, &te)) {
+        do {
+            if (te.th32OwnerProcessID == currentProcessId && te.th32ThreadID != currentThreadId) {
+                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+                if (hThread) {
+                    threadHandles.push_back(hThread);
+                }
+            }
+        } while (Thread32Next(hSnapshot, &te));
     }
-    __except(EXCEPTION_EXECUTE_HANDLER) {
-        LogSEHException("post_logic", "{{ hook.behaviors.security_policy.post_hook }}", GetExceptionCode());
-        return false;
-    }
+    CloseHandle(hSnapshot);
+    return threadHandles;
 }
-{% endif %}
-{% endfor %}
