@@ -15,6 +15,7 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
    - [Template System](#template-system)
 3. [Policy YAML Schema](#policy-yaml-schema)
    - [Telemetry & Metrics Performance Guidelines](#telemetry--metrics-performance-guidelines)
+   - [Telemetry Expressions & Pointer Dereferencing Safety](#telemetry-expressions--pointer-dereferencing-safety)
 4. [Template Architecture](#template-architecture)
 5. [Hooking Engine Abstraction](#hooking-engine-abstraction)
 6. [Build & Usage Guide](#build--usage-guide)
@@ -27,19 +28,22 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
 
 ```
 HookDesigner/
-├── transpiler.py              # Core transpiler: parse → extract → render → compile
+├── transpiler.py              # Core transpiler
 ├── injector.cpp               # C++ DLL injector (inject/eject/launch modes)
 ├── scada_engine.cpp           # SCADA simulator target with exported hookable functions
 ├── engines.yaml               # Engine registry: maps engine names to templates, libs, args
 ├── requirements.txt           # Python dependencies
-├── .env.example               # Template for local environment paths (MSVC, Detours, Frida)
+├── .env.example               # Template for local environment paths (MSVC, Detours, Frida, Telemetry)
 │
 ├── templates/                 # Jinja2 C++ template files
 │   ├── detours_template.cpp   # Detours engine template (includes sub-templates)
 │   ├── frida_template.cpp     # Frida-Gum engine template
-│   ├── _hook_body.cpp         # Shared hook body: arg capture, pre/post logic, telemetry
+│   ├── _hook_body.cpp         # Shared hook body: arg capture, pre/post logic, timing execution
+│   ├── _telemetry_globals.cpp # Global exposer/registry pointers, headers, ToLabelString overloads
+│   ├── _telemetry_init.cpp    # Spdlog thread pool / sink init and Prometheus exposer/metric family registration
+│   ├── _telemetry_body.cpp    # Runtime log rule evaluation and Prometheus metric counter/gauge/histogram updates
 │   ├── _dllmain.cpp           # Shared DLL entry point (DllMain)
-│   └── _user_logic_helpers.cpp# Shared helpers
+│   └── _user_logic_helpers.cpp# Shared helpers (SEH ReadPointer, CopyString, thread tracking)
 │
 └── test_run/                  # Test artifacts and example policies
     ├── policy_full.yaml       # Example multi-hook, multi-engine policy
@@ -91,17 +95,23 @@ The transpiler supports three mutually exclusive operational modes:
 | `policy` | `scada_policy.yaml` | Path to the policy YAML file |
 | `--output-cpp` | `generated_hook.cpp` | Destination path for the generated C++ source |
 | `--output-dll` | `generated_hook.dll` | Destination path for the compiled DLL |
+| `--libclang` | `$LIBCLANG_PATH` | Path to `libclang.dll` file or containing directory |
 | `--vcvars` | `$VCVARS64_PATH` | Path to MSVC's `vcvars64.bat` |
 | `--detours-include` | `$DETOURS_INC` | Detours header include directory |
 | `--detours-lib` | `$DETOURS_LIB` | Detours static library (`.lib`) path |
 | `--frida-include` | `$FRIDA_INC` | Frida-Gum header include directory |
 | `--frida-lib` | `$FRIDA_LIB` | Frida-Gum static library (`.lib`) path |
+| `--spdlog-include` | `$SPDLOG_INC` | Path to `spdlog` header include directory |
+| `--prometheus-include` | `$PROMETHEUS_INC` | Path to `prometheus-cpp` include directory |
+| `--prometheus-libs` | `$PROMETHEUS_LIBS` | Comma-separated paths to `prometheus-cpp` static `.lib` files |
 | `--rt-link` | `/MT` | MSVC runtime linking model (`/MT` static or `/MD` dynamic) |
 | `--gen-only` | `false` | Only render C++ without compiling |
 | `--compile-only` | `false` | Only compile existing C++ without parsing/generating |
 | `--validate-only` | `false` | Only validate the policy YAML |
 | `--engines-config` | `engines.yaml` | Path to the engine registry configuration file |
 
+> [!NOTE]
+> **Compiler Options**: When invoking MSVC `cl.exe`, the transpiler applies `/LD` (DLL generation), `/EHa` (asynchronous SEH structured exception handling to catch memory violations during string copying or pointer dereferencing), `/O2` (optimization), `/Zi` and `/FS` (PDB debug symbols), `/utf-8` (character encoding), `/std:c++17` (C++17 language standard), and automatically links required Windows system libraries including `ws2_32.lib` and `crypt32.lib` when Prometheus metrics are enabled.
 
 #### Features
 
@@ -111,15 +121,7 @@ The transpiler supports three mutually exclusive operational modes:
 
 3. **Separation of policy from logic**: The YAML policy specifies *what* to hook and *which behaviors* to apply, while the C++ logic file specifies *how* (the actual callback implementations). This separation allow user to write C++ code in a usual code editor with syntax highlighting/intellisense enabled. It also enables the same logic file to be reused across different policies and engines.
 
-4. **Sensible Defaults with an Escape Hatch (Telemetry Expressions & Pointer Dereferencing)**:
-   - **Sensible Defaults**: In telemetry conditions and log format strings, referencing standalone parameter variables (e.g., `input_paramName`) automatically generates type-safe memory reads using `ReadPointer(...)` or `(uintptr_t)(...)` based on type analysis. Policy authors do not need to write `ReadPointer` or dereference primitives manually for standalone parameters.
-   - **Escape Hatch & Member Access**: Policy authors can write arbitrary C++ expressions, custom local variables (declared in `pre_hook` / `post_hook`), address-of operators, or explicit C++ casts. 
-   
-   > [!IMPORTANT]
-   > **Member Access Requires Manual Safety:** When accessing struct or class fields through pointers (e.g., `input_pStruct->field`), the transpiler detects member access (`->` or `.`) and **bypasses automatic pointer dereferencing**. In this case, automatic crash protection is not applied, so **the policy author must explicitly handle memory safety manually** (e.g., by wrapping the member path in `ReadPointer(...)` as in `ReadPointer(input_pStruct->field)` or verifying non-null pointers).
-
-
-
+4. **Sensible Defaults & Telemetry Expression Parsing**: Standalone function parameter references (`input_<param>`, `output_<param>`) in log rules and metric conditions or values are automatically analyzed via AST and wrapped in safe memory dereferencing primitives (`ReadPointer`). Arbitrary C++ expressions, casts, and pointer member access paths (`->`) are also supported. See [Telemetry Expressions & Pointer Dereferencing Safety](#telemetry-expressions--pointer-dereferencing-safety) for full details.
 
 ---
 
@@ -139,11 +141,17 @@ The default mode (when no mode keyword is provided) is `inject`:
 ```
 injector.exe <PID> <DLL_PATH>
 ```
-#### Design Decisions
+#### Features
 
 1. **Separate `InitializeHooks` and `DeinitializeHooks` call**: Rather than attaching/detaching hooks in `DllMain` (which runs under the OS loader lock and has severe restrictions on what APIs can be called), the injector explicitly calls the exported `InitializeHooks` function via a second remote thread after injection completes. This avoids loader-lock deadlocks. Similarly, `DeinitializeHooks` is called before unloading the DLL to ensure a clean exit.
 
 2. **Launch mode with `CREATE_SUSPENDED`**: The launch mode creates the target process in a suspended state, injects the DLL and installs hooks *before* the process's main thread runs. This guarantees hooks are active from the very first function call, which is critical for intercepting initialization-time behavior.
+
+3. **Thread-Safe Ejection & Memory Leak Safety Fallback**: When ejecting a DLL (`injector.exe eject`), target threads might remain executing inside hooked callback functions or blocked on the target function (frequent with blocking functions, e.g. `recv()`, `Sleep()`, `WaitForSingleObject()`). Ejection is handled via a 2-tier safety mechanism:
+   - **Hook Teardown & Spin-Wait Timeout**: Inside the Hook DLL, `DeinitializeHooks` immediately reverts all active hooks so no new threads enter hook routines. It then enters a 2-second spin-wait loop checking if active threads inside hook bodies reach zero.
+     - **Clean Exit (`TRUE`)**: If all threads exit within 2 seconds, logger/metrics registries (`spdlog::shutdown()`, Prometheus) and TLS indexes are cleanly freed, and `DeinitializeHooks` returns `TRUE` (`1`).
+     - **Ejection Failure (`FALSE`)**: If threads remain trapped in hook routines after 2 seconds, `DeinitializeHooks` skips logger/metrics destruction (preventing crash access violations for threads still running logging logic), logs a warning via `OutputDebugStringA`, and returns `FALSE` (`0`).
+   - **Injector Fallback Strategy**: Upon receiving `FALSE` from `DeinitializeHooks`, the injector logs a warning and **deliberately skips calling `FreeLibrary`**. Leaking the DLL in target memory prevents the target process from access violation crashes if blocked threads eventually unblock and attempt to execute code in unmapped memory.
 
 ---
 
@@ -184,6 +192,34 @@ The policy YAML file is the primary input to the transpiler. It consists of two 
 | `engines` | `string \| list[string]` | No | `["detours"]` | One or more hooking engines to generate code for. Each engine produces a separate output file. |
 | `process` | `string` | **Yes** | — | Name of the target process executable (e.g., `scada_engine.exe`). |
 | `logic_file` | `string` | **Yes** | — | Relative path (from the policy file) to the C++ user logic file containing signatures and callbacks. |
+| `telemetry` | `object` | No | `null` | Global telemetry and metrics configuration (logging framework and Prometheus metrics exposition). |
+
+#### `telemetry` Object
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `logger` | `string` | No | `null` | Logging framework (`"spdlog"` or omitted). |
+| `logger_config` | `object` | No | `{}` | Logger sink and format configuration. |
+| `metrics` | `string` | No | `null` | Metrics framework (`"prometheus"` or omitted). |
+| `metrics_config` | `object` | No | `{}` | Prometheus HTTP exposer endpoint configuration. |
+
+##### `logger_config`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `type` | `string` | `"file"` | Log sink type: `"udp"` (for remote logging) or `"file"` (for disk file sink). |
+| `host` | `string` | `"127.0.0.1"` | Target host IP address for UDP Syslog sink. |
+| `port` | `integer` | `1514` | Target UDP port for Syslog formatted logs. |
+| `file` | `string` | `"hook_log.txt"` | Output log file path when `type: "file"`. |
+| `level` | `string` | `"info"` | Global log severity filter level (`"trace"`, `"debug"`, `"info"`, `"warn"`, `"error"`, `"critical"`). |
+
+##### `metrics_config`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `endpoint` | `string` | `"127.0.0.1:8080"` | Prometheus HTTP Exposer listening address and port (e.g. `"0.0.0.0:8085"`). |
+
+---
 
 ### `hooks` Section
 
@@ -194,6 +230,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `function_name` | `string` | **Yes** | — | Name of the target function to hook (must match a signature in the logic file). |
+| `is_noreturn` | `bool` | No | `false` | Explicit flag indicating that the function never returns (e.g. `ExitProcess`, `RaiseException`, `ExitThread`). Inferred automatically for known functions (`RaiseException`, `ExitProcess`, `ExitThread`). Enables fast attaching mode in Frida-Gum for correctly adjusting thread-tracking RAII cleanup for this type of functions. |
 | `module` | `string` | No | `""` | Name of the DLL/EXE module containing the target function. If empty, uses the main process module. |
 | `address_resolution` | `object` | No | `{strategy: "export"}` | How to resolve the function's address at runtime. See below. |
 | `behaviors` | `object` | No | `{}` | Behavioral policies to apply to this hook. See below. |
@@ -203,6 +240,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `strategy` | `string` | **Yes** | Resolution strategy: `"export"` (via `GetProcAddress`) or `"offset"` (via base address + RVA). |
+| `symbol_name` | `string` | No | Exported symbol name used by `GetProcAddress` (default: `function_name`). Allows hooking exported symbols with mangled/decorated C++ names (e.g., `"?Put@CLogQueue@@QEAAHPEAULOG_QENTRY@@@Z"`) or exported aliases differing from the DSL function name. |
 | `rva_offset` | `string` | **If `strategy: offset`** | Hexadecimal RVA offset (e.g., `"0x1A30"`). Integers are also accepted and auto-converted to hex. |
 
 #### `behaviors` Object
@@ -217,7 +255,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `execution_time` | `bool` | `false` | If `true`, measure hook latency using `QueryPerformanceCounter`. |
+| `execution_time` | `bool` | `false` | If `true`, measure target function execution latency using `QueryPerformanceCounter`, enabling the `latency` wildcard (in milliseconds) for use in metric values, conditions, and log format strings. |
 | `counters` | `list[object]` | `[]` | List of Prometheus counter metric definitions. |
 | `gauges` | `list[object]` | `[]` | List of Prometheus gauge metric definitions. |
 | `histograms` | `list[object]` | `[]` | List of Prometheus histogram metric definitions. |
@@ -231,7 +269,7 @@ Each metric item defined inside `counters`, `gauges`, or `histograms` supports t
 | `name` | `string` | **Yes** | — | Unique metric name identifier within the hook. |
 | `description` | `string` | No | `""` | Help string / description for the Prometheus metric family. |
 | `condition` | `string` | No | `"true"` | Boolean C++ telemetry expression evaluated to determine if the metric is updated. |
-| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `latency`, `input_<param>`, `output_<param>`, `__hook_result`, or global variable). |
+| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `latency`, `input_<param>`, `output_<param>`, `__hook_result`, or a valid c++ variable). |
 | `buckets` | `list[float]` | No (**Histograms**) | `[0.001, 0.005, ...]` | Upper bounds for histogram buckets. Default is `[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0]`. Must be a non-empty, strictly increasing list of positive numbers. |
 | `label` | `dict[string, string]` | No | `{}` | Key-value dictionary specifying dynamic Prometheus label mapping (e.g. `{ label_key: "expression" }`). At most 1 dynamic label per metric is allowed. |
 
@@ -256,6 +294,20 @@ performance_metrics:
       value: "latency"
       buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
 ```
+###### Metrics Performance Guidelines
+
+When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-path hooked functions (e.g., `EnterCriticalSection`, `ReadFile`, `WaitForSingleObject`), adhere to the following practices:
+
+1. **Validation & Low-Cardinality Metric Labels**:
+   - Avoid using high-cardinality dynamic variables (such as thread IDs `{tid}`, pointer addresses `{input_buf_ptr}`, or timestamps) inside Prometheus metric label expressions.
+   - Prometheus documentation explicitly state: *“Labels should only be used for low-cardinality dimensions (e.g. HTTP status codes, error types, method names).”* High-cardinality values belong in **logs**, not metric labels.
+
+2. **Thread-Local / Direct Metric Caching**:
+   - For hooks with dynamic low-cardinality labels, HookDesigner automatically utilizes a `thread_local static` metric cache.
+   - The first invocation for a given label set fetches the metric reference from `prometheus::Family::Add()`, while subsequent calls on the same thread bypass Prometheus's internal `std::mutex` lock, achieving near zero-cost updates on the hot path.
+
+3. **Promote Label-less Counters for Hot Paths**:
+   - For extremely high-frequency functions, prefer label-less counters. Label-less metrics use direct global references (`g_PromMetric_->Increment()`) which perform lock-free atomic updates (`std::atomic<double>`).
 
 ##### `log_rules`
 
@@ -265,7 +317,7 @@ performance_metrics:
 | `condition` | `string` | `"true"` | Boolean C++ telemetry expression evaluated to determine if log fires. |
 | `level` | `string` | `"info"` | Log level (`trace`, `debug`, `info`, `warn`, `error`, `critical`). |
 | `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or `__hook_result` to capture for auto-generated format strings. |
-| `format` | `string` | `null` | Custom format string supporting placeholders (`{tid}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`). |
+| `format` | `string` | `null` | Custom log format string supporting placeholders (`{tid}` (thread id), `{latency}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`, or any valid C++ `{variable/expression}`). |
 
 ###### Ways to Specify `log_rules`
 
@@ -343,20 +395,16 @@ The transpiler validates all `log_rules` in `process_log_rules` and will raise a
   - Placeholders support C++ format specifiers following a colon (e.g., `{input_samDesired:x}`).
 - **Telemetry Requirement**: If `log_rules` are present on any hook, top-level `configure.telemetry` must be configured (e.g., `logger: spdlog`).
 
-#### Telemetry & Metrics Performance Guidelines
+##### Telemetry Expressions & Pointer Dereferencing Safety
 
-When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-path hooked functions (e.g., `EnterCriticalSection`, `ReadFile`, `WaitForSingleObject`), adhere to the following best practices:
+When writing C++ telemetry expressions in `log_rules` (conditions, custom formats, arguments) or `performance_metrics` (metric conditions, gauge/histogram values, dynamic label expressions), the transpiler balances memory safety and flexibility through defaults and an explicit escape mechanism:
 
-1. **Validation & Low-Cardinality Metric Labels**:
-   - Avoid using high-cardinality dynamic variables (such as thread IDs `{tid}`, pointer addresses `{input_buf_ptr}`, or timestamps) inside Prometheus metric label expressions.
-   - Prometheus best practices explicitly state: *“Labels should only be used for low-cardinality dimensions (e.g. HTTP status codes, error types, method names).”* High-cardinality values belong in **logs**, not metric labels.
+- **Defaults (Automatic Safe Memory Reads)**: Referencing standalone parameter variables (e.g., `input_paramName` or `output_paramName`) automatically generates type-safe memory reads using `ReadPointer(...)` or safe string copying based on static type analysis from `libclang` (see `safe_read_expr` and `safe_type` under [Parameter Dictionary Fields](#parameter-dictionary-fields)). Policy authors do not need to write explicit dereference primitives for standalone parameters.
 
-2. **Thread-Local / Direct Metric Caching**:
-   - For hooks with dynamic low-cardinality labels, HookDesigner automatically utilizes a `thread_local static` metric cache (`ThreadLocalMetricCache` / `ThreadLocalHistogramCache`).
-   - The first invocation for a given label set fetches the metric reference from `prometheus::Family::Add()`, while subsequent calls on the same thread bypass Prometheus's internal `std::mutex` lock, achieving near zero-cost updates on the hot path.
+- **Escape mechanism & Flexible Expressions**: Policy authors can write arbitrary C++ expressions, custom local variables (declared in `pre_hook` / `post_hook`), address-of operators (`&`), global atomic variables, or explicit C++ casts.
 
-3. **Promote Label-less Counters for Hot Paths**:
-   - For extremely high-frequency functions, prefer label-less counters. Label-less metrics use direct global references (`g_PromMetric_->Increment()`) which perform lock-free atomic updates (`std::atomic<double>`) in under 5 nanoseconds.
+> [!IMPORTANT]
+> **Member Access Bypasses Automatic Type Analysis:** When accessing struct or class fields of a parameter (e.g., `input_pStruct->field` or `input_pStruct.field`), the transpiler detects member access (`->` or `.`) and **bypasses all automatic `libclang` type transformations**. None of the automatic protections generated for standalone parameters (such as `ReadPointer(...)` pointer dereferencing or `CopyString(...)` safe string copying) are applied. In this case, **the policy author must explicitly handle memory safety manually** (e.g., wrapping pointer field reads in `ReadPointer(input_pStruct->pInt)` or string fields in `CopyString(input_pStruct->szName)` — defined in [`_user_logic_helpers.cpp`](file:///c:/Users/davig/Desktop/Thesis/Code/MasterThesis/code/HookDesigner/templates/_user_logic_helpers.cpp)).
 
 ---
 
@@ -377,41 +425,65 @@ configure:
   engines:
     - detours
     - frida
-  process: scada_engine.exe
-  logic_file: "policy_logic.cpp"
+  process: ApmsrtDIP.exe
+  logic_file: "test_queue.cpp"
+  telemetry:
+    logger: "spdlog"
+    logger_config:
+      type: "udp"
+      host: "192.168.88.1"
+      port: 1514
+      level: "info"
+    metrics: "prometheus"
+    metrics_config:
+      endpoint: "0.0.0.0:8085"
 
 hooks:
-  - module: scada_engine.exe
-    function_name: ParseProprietaryPacket
+  - module: Uti109064.dll
+    function_name: QueuePut
     address_resolution:
-      strategy: offset
-      rva_offset: "0x1A30"
+      strategy: export
+      symbol_name: "?Put@CLogQueue@@QEAAHPEAULOG_QENTRY@@@Z"
     behaviors:
       performance_metrics:
         execution_time: true
+        counters:
+          - name: "queue_put_total"
+            description: "Total QueuePut calls across all queues"
+            label:
+              queue_id: "input_pQueue.queueId"
+          - name: "queue_put_success"
+            description: "Successful QueuePut calls"
+            condition: "__hook_result == 0"
+            label:
+              queue_id: "input_pQueue.queueId"
+        histograms:
+          - name: "queue_put_latency"
+            description: "Distribution of QueuePut execution times"
+            value: "latency"
+            label:
+              queue_id: "input_pQueue.queueId"
       log_rules:
-        - arguments:
-            - packetBuffer
-            - complexityWeight
-            - result
+        - name: "queue_put_failed"
+          condition: "__hook_result != 0"
+          level: "warn"
+          format: "[WARN] PUTQ FAILED | queue_id={input_pQueue.queueId} result={__hook_result}"
       security_policy:
-        pre_hook: SharedPacketPreHook
+        pre_hook: QueuePut_pre
 
-  - module: scada_engine.exe
-    function_name: LogTaskResult
+  - module: kernel32.dll
+    function_name: RaiseException
+    is_noreturn: true
     address_resolution:
       strategy: export
     behaviors:
       log_rules:
-        - arguments:
-            - taskId
-            - status
-      security_policy:
-        pre_hook: GenericEnterLog
-        post_hook: LogTaskResult_post
+        - name: "raise_exception"
+          level: "error"
+          format: "[RaiseException] Exception raised Code: 0x{input_dwExceptionCode:x}, Flags: 0x{input_dwExceptionFlags:x}"
 ```
 
-
+---
 
 ## Template Architecture
 
@@ -421,50 +493,107 @@ The template system uses Jinja2's `{% include %}` mechanism to compose engine-sp
 
 #### `detours_template.cpp`
 
-The Detours template. Generates a complete DLL source file that:
+The template for the Microsoft Detours engine. It generates a self-contained C++ source file implementing hooks specified in the YAML policy:
 
-- Includes Windows headers and `<detours.h>`.
-- Defines the `HookActiveThreads` RAII struct for tracking in-flight hook executions.
-- Includes `_user_logic_helpers.cpp` (which itself `#include`s the user's logic file).
-- For each hook: generates a `typedef` for the original function pointer type, a static `True<FunctionName>` pointer, and a `Hooked<FunctionName>` function that includes `_hook_body.cpp`.
-- Implements `EnlistAllThreads()` to enumerate process threads for Detours' thread-update mechanism.
-- Exports `InitializeHooks()`: resolves target addresses, begins a Detours transaction, attaches all hooks, commits.
-- Exports `DeinitializeHooks()`: begins a transaction, detaches all hooks, commits, spin-waits for in-flight executions.
-- Includes `_dllmain.cpp`.
+- **Hooking Paradigm**: Uses Microsoft Detours' inline prologue patching mechanism (`DetourAttach` / `DetourDetach`). Overwrites the first 5+ bytes of the target API function prologue with a relative `JMP` instruction to `Hooked<FunctionName>`, allocating a trampoline stub (`True<FunctionName>`) containing the original prologue instructions and a jump back to the real function.
+
+- **Attaching Procedure (`InitializeHooks()`)**:
+  1. Allocates a Thread Local Storage (TLS) index via `TlsAlloc()` for recursion guarding (`RecursionHookGuard`).
+  2. Initializes telemetry globals and metrics servers via `_telemetry_init.cpp`.
+  3. Resolves target function virtual addresses using module handle lookup and `GetProcAddress`.
+  4. Enumerate process worker threads via `EnlistAllThreads()` (using `CreateToolhelp32Snapshot`).
+  5. Opens a Detours transaction via `DetourTransactionBegin()`.
+  6. Registers all worker threads with `DetourUpdateThread()`.
+  7. Attaches each target function via `DetourAttach(&(PVOID&)True<FunctionName>, Hooked<FunctionName>)`.
+  8. Commits the transaction with `DetourTransactionCommit()` and closes thread handles.
+
+- **Detaching Procedure (`DeinitializeHooks()`)**:
+  1. Stops background HTTP metric servers (`g_PromExposer.reset()`) to terminate active web worker threads cleanly.
+  2. Enumerate process threads via `EnlistAllThreads()`.
+  3. Opens a Detours transaction (`DetourTransactionBegin()`), calls `DetourUpdateThread()` for each worker thread, and detaches all target functions via `DetourDetach()`.
+  4. Commits the transaction via `DetourTransactionCommit()`, reverting target API prologues to original bytes.
+
+- **Thread Safety & Ejection Synchronization**:
+  - **Attach/Detach Thread Safety**: Uses `EnlistAllThreads()` combined with `DetourUpdateThread()` to pause and adjust worker thread execution states during prologue byte modification.
+  - **Ejection Guard**: Every hook wrapper unconditionally instantiates a `HookActiveThreads` RAII counter on entry, which atomically increments `activeThreads` on construction and decrements it on destruction. During `DeinitializeHooks()`, after detaching API hooks, the DLL executes a 2-second spin-wait loop checking `activeThreads.load() == 0` (to avoid DLL unload while worker threads are still within the hook logic). Once confirmed zero, telemetry loggers (`spdlog::shutdown()`) and TLS slots are safely destroyed before DLL unloading.
 
 #### `frida_template.cpp`
 
-The top-level Frida-Gum template. Structurally parallel to the Detours template, but utilizes Frida-Gum APIs:
+The top-level template for the Frida-Gum engine. Utilizes Frida's dynamic binary instrumentation runtime (`"frida-gum.h"`):
 
-- Includes `"frida-gum.h"`.
-- Uses `gum_interceptor_replace()` for standard returning functions and `gum_interceptor_replace_fast()` for non-returning functions (`is_noreturn: true`).
-- Conditionally uses `HookActiveThreads` RAII counter for non-returning functions to track active execution without interfering with Frida's invocation stack.
-- `InitializeHooks()` calls `gum_init_embedded()` and obtains a `GumInterceptor`.
-- `DeinitializeHooks()` uses a dual ejection check (`gum_interceptor_flush()` + `g_ActiveHooks.load() == 0`) before unreferencing the interceptor and calling `gum_deinit_embedded()`.
+- **Hooking Paradigm**: Uses Frida-Gum dynamic code allocation and interceptor replacement (`gum_init_embedded()`, `GumInterceptor`). It supports dual attaching modes based on the function return policy (`is_noreturn`).
+
+- **Attaching Procedure (`InitializeHooks()`)**:
+  1. Allocates a TLS index via `TlsAlloc()` for recursion guarding (same as Detours).
+  2. Initializes telemetry globals, initializes embedded Frida-Gum (`gum_init_embedded()`), and obtains a `GumInterceptor` handle via `gum_interceptor_obtain()`.
+  3. Resolves target function addresses.
+  4. Enumerates process worker threads via `EnlistAllThreads()` and explicitly suspends them with `SuspendThread()`.
+  5. Opens a Frida transaction via `gum_interceptor_begin_transaction(interceptor)`.
+  6. Replaces target functions based on return behavior:
+     - **Standard Functions** (`is_noreturn: false`): Calls `gum_interceptor_replace()`, enabling Frida's invocation listener stack tracking for thread ejection via `gum_interceptor_flush()`.
+     - **Non-Returning Functions** (`is_noreturn: true`, e.g. `ExitProcess`, `ExitThread`, `RaiseException`): Calls `gum_interceptor_replace_fast()`. Standard `gum_interceptor_replace()` pushes an invocation frame on entry and expects to pop it on function exit; because non-returning functions never return, Frida's listener frame is never popped, which would cause `gum_interceptor_flush()` to hang indefinitely or fail. Using `gum_interceptor_replace_fast()` bypasses Frida's invocation listener stack, adopting a direct replacement model (similar to Detours) that relies on the `HookActiveThreads` RAII counter instead.
+  7. Commits the transaction via `gum_interceptor_end_transaction(interceptor)`, resumes all worker threads (`ResumeThread()`), and closes handles.
+
+- **Detaching Procedure (`DeinitializeHooks()`)**:
+  1. Stops background HTTP metric servers (`g_PromExposer.reset()`).
+  2. Enumerates and suspends all worker threads (`SuspendThread()`).
+  3. Opens a transaction (`gum_interceptor_begin_transaction()`), reverts all hook replacements via `gum_interceptor_revert()`, and commits the transaction (`gum_interceptor_end_transaction()`).
+  4. Resumes worker threads (`ResumeThread()`) and closes thread handles.
+
+- **Thread Safety & Ejection Synchronization**:
+  - **Attach/Detach Thread Safety**: Combines explicit worker thread suspension (`SuspendThread()`) with Frida's transaction block (`gum_interceptor_begin_transaction` / `end_transaction`).
+  - **Dual Ejection Synchronization**: Standard returning functions rely on `gum_interceptor_flush(interceptor)` to verify that zero active invocation frames remain on Frida's internal listener stack. Non-returning functions use the `HookActiveThreads` RAII counter (`activeThreads`) to track thread trapped within the hook logic . `DeinitializeHooks()` executes a 2-second spin-wait loop performing a dual check: `if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0)`. Once both checks confirm zero active threads, `g_object_unref(interceptor)` and `gum_deinit_embedded()` are called, followed by telemetry destruction (`spdlog::shutdown()`).
 
 #### `_hook_body.cpp` (Shared Partial)
 
-Generates the body of each `Hooked<FunctionName>` function. This is included once per hook within a `{% for hook in hooks %}` loop. It generates:
+Generates the body of each `Hooked<FunctionName>` function wrapper. Included once per hook within a `{% for hook in hooks %}` loop. It generates:
 
-1. **Argument capture on entry**: For each logged argument, captures the value before the original call
-2. **Performance timing start**: If `execution_time` is enabled, queries `QueryPerformanceCounter`.
-3. **Pre-hook invocation**: If a `pre_hook` is defined, calls `RunPreLogic_<name>(...)`.
+1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types or `CopyString` for string pointers). 
+2. **Performance timing start**: Queries `QueryPerformanceCounter` if `execution_time` is enabled.
+3. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks.
 4. **Original function call**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result`.
-5. **Post-hook invocation**: If a `post_hook` is defined, calls the post-hook function, passing target function parameters.
-6. **Performance timing end**: Computes elapsed milliseconds, if specified.
-7. **Argument capture on exit**: Re-captures logged arguments to detect mutations.
-8. **Telemetry output**: Builds a log line with thread ID, argument values (showing `original -> mutated` for changed values), and latency.
+5. **Post-hook invocation**: Calls user `post_hook` callback.
+6. **Performance timing end**: Computes elapsed milliseconds latency.
+7. **Argument capture on exit**: Re-captures parameters if referenced, in the policy, they are indicated as `output_<parameter_name>`. 
+8. **Telemetry execution**: Includes `_telemetry_body.cpp` to evaluate log rules and record metrics.
 9. **Return**: Returns `__hook_result` (or void).
+
+#### `_telemetry_globals.cpp` (Shared Partial)
+
+Generates global pointers, headers, and helper overloads for telemetry components:
+
+- Includes headers for `spdlog` (async logger, file/udp sinks) and `prometheus-cpp` (exposer, registry, counter, gauge, histogram).
+- Defines global pointers `g_PromExposer` and `g_PromRegistry`.
+- Declares metric family pointers (`g_PromFamily_<func>_<metric>`) and static metric handles (`g_PromMetric_<func>_<metric>`) for label-less metrics.
+- Provides overloaded `ToLabelString(...)` helper functions for converting string literals, primitive types (`int`, `double`), and custom C++ expressions into Prometheus label strings.
+
+#### `_telemetry_init.cpp` (Shared Partial)
+
+Generates initialization code invoked inside `InitializeHooks()`:
+
+- Initializes high-resolution timer frequency (`QueryPerformanceFrequency`).
+- Configures `spdlog` thread pool (`init_thread_pool`) and creates an asynchronous UDP Syslog sink (formatted with RFC-5424 timestamp) or basic file sink.
+- Instantiates `prometheus::Exposer` listening on the configured HTTP endpoint and registers `prometheus::Registry`.
+- Builds and registers all Prometheus metric families (`BuildCounter()`, `BuildGauge()`, `BuildHistogram()`) and adds label-less metric handles to the registry.
+
+#### `_telemetry_body.cpp` (Shared Partial)
+
+Generates runtime telemetry evaluation logic inside each `Hooked<FunctionName>` wrapper:
+
+- Evaluates log rules against runtime conditions and emits logs via `spdlog` (or `fmt::format` / `OutputDebugStringA`, if `logger` is None).
+- Evaluates counter, gauge, and histogram metric conditions.
+- Handles dynamic metric labels using thread-local metric caching (`thread_local std::unordered_map` and pointer caching) for high-performance lock-free lookup on hot execution paths.
 
 #### `_user_logic_helpers.cpp` (Shared Partial)
 
 Provides utility functions and SEH-protected wrappers included at the top of every generated file:
 
 - `#include "{{ logic_file_rel }}"` — includes the user's logic file.
-- `CopyString` — string copy helper to safely inspect `char*` pointers.
-- `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null.
-
-User callbacks (`pre_hook` and `post_hook`) are invoked directly within the `try { ... } catch (...)` exception blocks in `_hook_body.cpp` without wrapper indirection.
+- `RecursionHookGuard` — TLS-based thread guard to prevent re-entrant hook loops.
+- `HookActiveThreads` — RAII thread tracking counter (`activeThreads`) for safe ejection.
+- `CopyString` — safe string copy helper using SIMD `strnlen` to inspect `char*` pointers up to a max length without crash risks; memory access violations are caught by `/EHa` structured exception handling.
+- `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null or unmapped; protected against access violations via `/EHa`structured exception .
+- `EnlistAllThreads` — enumerates process threads (except the current one) that will be suspended during hook attach/detach for preventing crashes.
 
 #### `_dllmain.cpp` (Shared Partial)
 
@@ -483,15 +612,39 @@ All templates receive the following Jinja2 context variables:
 | `hooks` | `list[dict]` | Fully enriched list of hook objects with all normalized fields, extracted parameters, generated `address_resolution_cpp` expressions |
 | `engine` | `string` | Current engine name (e.g., `"detours"`, `"frida"`) |
 | `logic_file_rel` | `string` | Relative path from the output C++ file to the user's logic file (for `#include`) |
+| `telemetry` | `dict` | Enriched global telemetry configuration (logger framework, logger config, metrics framework, metrics config, execution timing flag) |
+
+The `telemetry` object contains:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `logger` | `string \| null` | Configured logger framework (e.g. `"spdlog"`, or `null`) |
+| `logger_config` | `dict` | Sink and log level configuration (`type`, `host`, `port`, `file`, `level`) |
+| `metrics` | `string \| null` | Configured metrics framework (e.g. `"prometheus"`, or `null`) |
+| `metrics_config` | `dict` | Metrics endpoint configuration (`endpoint`) |
+| `has_execution_time` | `bool` | `true` if execution timing is enabled on any defined hook |
 
 Each `hook` object within `hooks` contains the fields from the YAML schema plus transpiler-enriched fields:
 
 | Field | Description |
 |----------------|-------------|
-| `parameters` | List of parameter dicts with `type`, `name`, `pointer_depth`, `underlying_type`, `is_char_ptr`, `is_deref`, `safe_read_expr`, `safe_type` |
+| `parameters` | List of parameter dicts (see detailed parameter key breakdown below) |
 | `return_type` | C++ return type string |
 | `calling_convention` | Detected calling convention if specified (e.g., `"__stdcall"`, `""`) |
 | `address_resolution_cpp` | Generated C++ expression for resolving the function address |
+
+#### Parameter Dictionary Fields
+
+Each element in `hook.parameters` is a dictionary describing a function parameter with transpiler-enriched metadata:
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `name` | `string` | Parameter variable identifier in the C++ function signature |
+| `type` | `string` | Original C++ type declaration (e.g., `LPCSTR`, `int*`) |
+| `pointer_depth` | `int` | Level of pointer indirection |
+| `is_char_ptr` | `bool` | `true` if parameter is a C-string pointer (`char*`, `LPCSTR`, `wchar_t*`, etc.) |
+| `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)` or raw parameter) |
+| `safe_type` | `string` | Appropriate C++ type for storing/logging the value (e.g., `std::string` for string pointers) |
 
 ---
 
@@ -532,42 +685,9 @@ inline_hook:
 | `cast_format` | Yes (for `inline_hook`) | Python format string for casting `GetProcAddress` results. `{name}` is replaced with the function name. |
 | `libs_arg` | Yes | Name of the CLI argument providing the engine's static library path (maps to `argparse` attribute) |
 | `inc_arg` | Yes | Name of the CLI argument providing the engine's include directory (maps to `argparse` attribute) |
-| `extra_libs` | No (default `[]`) | Additional Windows `.lib` files to link (validated against `^[a-z0-9_\-\.]+\.lib$`) |
+| `extra_libs` | No (default `[]`) | Additional Windows `.lib` files or paths to link |
 
-
-### Frida Attaching Modes & Thread Synchronization
-
-HookDesigner supports dual Frida-Gum attaching modes based on the function return behavior specified in the YAML policy (`is_noreturn`):
-
-#### 1. Standard Attaching Mode (`gum_interceptor_replace`)
-- **Target Functions**: Standard functions that return to the caller (`is_noreturn: false`).
-- **Mechanism**: Calls `gum_interceptor_replace(interceptor, target, replacement, nullptr, &original)`. Frida wraps execution with its full invocation listener/trampoline infrastructure.
-- **Ejection Tracking**: Frida's native `gum_interceptor_flush(interceptor)` tracks active invocation frames on Frida's internal stack. During `DeinitializeHooks()`, calling `gum_interceptor_flush()` ensures all in-flight calls exit before unloading the DLL.
-
-#### 2. Fast Attaching Mode (`gum_interceptor_replace_fast`)
-- **Target Functions**: Non-returning functions marked with `is_noreturn: true` (e.g., `RaiseException`, `ExitProcess`, `longjmp`).
-- **Mechanism**: Calls `gum_interceptor_replace_fast(interceptor, target, replacement, &original)`. Frida emits a direct inline jump to the hook wrapper without the overhead of Frida's invocation stack wrapper.
-- **Use Case**: Eliminates latency for critical non-returning calls and prevents Frida's call-stack unwinding wrappers from being corrupted by functions that never return.
-
-#### Hybrid Active Thread Synchronization (`HookActiveThreads`)
-
-Because `gum_interceptor_replace_fast` bypasses Frida's native invocation stack wrappers, Frida's `gum_interceptor_flush()` alone cannot detect when threads are executing inside pre-hook logic for non-returning functions.
-
-To solve this, HookDesigner implements a **hybrid RAII thread tracking pattern**:
-- **Selective Declaration**: `HookActiveThreads` and `g_ActiveHooks` are declared conditionally in `_user_logic_helpers.cpp` (`need_active_counter = (engine == 'detours') or has_noreturn`).
-- **Selective Guard Instantiation**: Inside `Hooked<FunctionName>`, `HookActiveThreads hook_active_threads;` is instantiated **only** for `is_noreturn: true` hooks when targeting Frida (and for all hooks when targeting Detours). Standard returning Frida hooks incur **zero thread-counter overhead**.
-- **Disarm on Delegate**: Prior to invoking the original non-returning function (`True<FunctionName>(...)`), `hook_active_threads.Release()` explicitly decrements `g_ActiveHooks--`. If an exception or early return occurs during pre-logic, the RAII destructor automatically fires to decrement `g_ActiveHooks--`.
-- **Dual Ejection Check**: In `DeinitializeHooks()`, when non-returning functions are present (`has_noreturn`), the flush loop waits for **both** `gum_interceptor_flush(interceptor)` AND `g_ActiveHooks.load() == 0`:
-  ```cpp
-  while (GetTickCount() - start < 2000) {
-      if (gum_interceptor_flush(interceptor) && g_ActiveHooks.load() == 0) {
-          g_Ejected = true;
-          break;
-      }
-      Sleep(50);
-  }
-  ```
-
+---
 
 ## Build & Usage Guide
 
@@ -584,7 +704,7 @@ To solve this, HookDesigner implements a **hybrid RAII thread tracking pattern**
 ### Environment Setup
 
 1. **Install Python dependencies**:
-   ```bash
+   ```cmd
    pip install -r requirements.txt
    ```
 
@@ -600,21 +720,29 @@ To solve this, HookDesigner implements a **hybrid RAII thread tracking pattern**
    # Frida-Gum Configuration
    FRIDA_INC=C:\Path\To\Frida
    FRIDA_LIB=C:\Path\To\Frida\frida-gum.lib
+
+   # Telemetry Configuration (spdlog & prometheus-cpp)
+   SPDLOG_INC=C:\Path\To\spdlog\include
+   PROMETHEUS_INC=C:\Path\To\prometheus-cpp\core\include,C:\Path\To\prometheus-cpp\pull\include
+   PROMETHEUS_LIBS=C:\Path\To\prometheus-cpp\lib\prometheus-cpp-core.lib,C:\Path\To\prometheus-cpp\lib\prometheus-cpp-pull.lib,C:\Path\To\prometheus-cpp\lib\civetweb.lib
+
+   # LLVM/Clang libclang Path
+   LIBCLANG_PATH=C:\Program Files\LLVM\bin
    ```
 
-3. **Compile the SCADA simulator** (for testing):
-   ```bash
+3. **Compile the SCADA simulator** (for simple testing):
+   ```bat
    build_engine.bat
    ```
 
 4. **Compile the injector** (using a Developer Command Prompt for VS):
-   ```bash
+   ```cmd
    cl.exe /EHsc /O2 injector.cpp /I"C:\Detours\include" "C:\Detours\lib.X64\detours.lib"
    ```
 
 ### Writing a Policy YAML
 
-Create a YAML file that declares the target process, the logic file, the hooking engine(s), and the list of functions to hook with their behaviors. For a detailed reference see the [Policy YAML Schema](#policy-yaml-schema) section.
+Create a YAML file that declares the target process, the logic file, the hooking engine(s), telemetry configuration, and the list of functions to hook with their behaviors. For a detailed reference see the [Policy YAML Schema](#policy-yaml-schema) section.
 
 ### Writing the User Logic C++ File
 
@@ -666,22 +794,22 @@ void SharedModifier(int& val) {
 ### Running the Transpiler
 
 **Full pipeline** (generate + compile):
-```bash
+```cmd
 python transpiler.py policy.yaml --output-cpp hook.cpp --output-dll hook.dll
 ```
 
 **Generate C++ only** (no compilation):
-```bash
+```cmd
 python transpiler.py policy.yaml --output-cpp hook.cpp --gen-only
 ```
 
 **Validate policy only**:
-```bash
+```cmd
 python transpiler.py policy.yaml --validate-only
 ```
 
 **Multi-engine generation** (produces `hook_detours.cpp`, `hook_detours.dll`, `hook_frida.cpp`, `hook_frida.dll`):
-```bash
+```cmd
 python transpiler.py policy.yaml --output-cpp hook.cpp --output-dll hook.dll
 ```
 When the policy specifies multiple engines, output files are automatically suffixed with the engine name.
@@ -689,17 +817,17 @@ When the policy specifies multiple engines, output files are automatically suffi
 ### Injecting the DLL
 
 **Into a running process**:
-```bash
+```cmd
 injector.exe inject <PID> hook.dll
 ```
 
 **Launch a new process with injection**:
-```bash
+```cmd
 injector.exe launch scada_engine.exe hook.dll
 ```
 
 **Eject a previously injected DLL**:
-```bash
+```cmd
 injector.exe eject <PID> hook.dll
 ```
 
@@ -707,7 +835,9 @@ injector.exe eject <PID> hook.dll
 
 ## Limitations & Future Work
 
-- **Logging Mechanism**: The telemetry and logging mechanism currently present in the generated hooks is temporary and logs directly to the console. In future iterations, this will be extended to serialize and send intercepted data asynchronously to a centralized database for persistent storage and analysis.
+HookDesigner currently focuses on the `inline_hook` paradigm (Microsoft Detours and Frida-Gum), providing low-overhead function-level API interception and telemetry generation. 
+
+Future work focuses on extending HookDesigner to support **Dynamic Binary Instrumentation (DBI)** frameworks such as **Intel PIN** and **DynamoRIO**.
 
 ---
 
@@ -729,8 +859,11 @@ injector.exe eject <PID> hook.dll
 |---------|---------|-------------|
 | **Microsoft Detours** | Inline function hooking (transactional API) | Detours engine |
 | **Frida-Gum** (C devkit) | Inline function hooking (`GumInterceptor` API) | Frida engine |
-| **Windows SDK** | Win32 APIs (`VirtualAllocEx`, `CreateRemoteThread`, `Toolhelp32`, etc.) | All components |
-| **MSVC C++ Runtime** | Standard library, SEH support | All components |
+| **spdlog** | High-performance asynchronous logging (file & UDP Syslog) | Telemetry logger |
+| **prometheus-cpp** | Prometheus HTTP metric exposition (counters, gauges, histograms) | Telemetry metrics |
+| **fmt** | String formatting library for logs and debug output | Telemetry logger |
+| **Windows SDK & System Libs** | Win32 APIs, Sockets (`ws2_32.lib`), Crypto (`crypt32.lib`), RPC (`Rpcrt4.lib`) | All components |
+| **MSVC C++ Runtime** | Standard library, `/EHa` SEH support | All components |
 
 ### Build Tools
 

@@ -33,7 +33,7 @@ std::string GetFilename(const std::string& path) {
     return path.substr(lastSlash + 1);
 }
 
-bool CallRemoteExport(HANDLE hProcess, HMODULE hRemoteModule, const std::string& localDllPath, const std::string& exportName) {
+bool CallRemoteExport(HANDLE hProcess, HMODULE hRemoteModule, const std::string& localDllPath, const std::string& exportName, DWORD* outExitCode = nullptr) {
     HMODULE hLocalMod = LoadLibraryExA(localDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
     if (!hLocalMod) {
         std::cerr << "Error: Failed to load DLL \"" << localDllPath << "\" locally. Error: " << GetLastError() << "\n";
@@ -58,6 +58,9 @@ bool CallRemoteExport(HANDLE hProcess, HMODULE hRemoteModule, const std::string&
     }
 
     WaitForSingleObject(hThread, INFINITE);
+    if (outExitCode) {
+        GetExitCodeThread(hThread, outExitCode);
+    }
     CloseHandle(hThread);
     return true;
 }
@@ -286,18 +289,24 @@ int main(int argc, char* argv[]) {
         LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
 
         std::cout << "Calling DeinitializeHooks remotely...\n";
-        if (!CallRemoteExport(hProcess, hRemoteModule, dllPath, "DeinitializeHooks")) {
+        DWORD deinitExitCode = 1; // Default to success/TRUE
+        if (!CallRemoteExport(hProcess, hRemoteModule, dllPath, "DeinitializeHooks", &deinitExitCode)) {
             std::cerr << "Warning: Failed to call DeinitializeHooks remotely.\n";
         }
 
-        std::cout << "Ejecting DLL...\n";
-        HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
-        if (!hThread) {
-            std::cerr << "Failed to create remote thread. Error: " << GetLastError() << "\n";
+        if (deinitExitCode == 0) { // FALSE
+            std::cout << "[WARNING] Hooks successfully detached, but some threads remain blocked inside them, frequent when blocking functions are hooked.\n";
+            std::cout << "[WARNING] Skipping FreeLibrary (leaking DLL in target memory) to prevent target crash. Ejection completed.\n";
         } else {
-            WaitForSingleObject(hThread, INFINITE);
-            std::cout << "Ejection successful\n";
-            CloseHandle(hThread);
+            std::cout << "Ejecting DLL...\n";
+            HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
+            if (!hThread) {
+                std::cerr << "Failed to create remote thread. Error: " << GetLastError() << "\n";
+            } else {
+                WaitForSingleObject(hThread, INFINITE);
+                std::cout << "Ejection successful\n";
+                CloseHandle(hThread);
+            }
         }
     }
     CloseHandle(hProcess);

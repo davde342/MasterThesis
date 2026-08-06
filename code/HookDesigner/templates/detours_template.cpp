@@ -149,9 +149,9 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
     // 3. Spin-wait safety loop for active threads inside hooks with a 2-second timeout
     DWORD start = GetTickCount();
     while (GetTickCount() - start < 2000) {
-        if (g_ActiveHooks.load() == 0) {
+        if (activeThreads.load() == 0) {
             Sleep(1000);
-            if (g_ActiveHooks.load() == 0) {
+            if (activeThreads.load() == 0) {
                 g_Ejected = true;
                 break;
             }

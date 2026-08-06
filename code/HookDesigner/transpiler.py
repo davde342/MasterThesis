@@ -28,7 +28,6 @@ DEFAULT_ENGINES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__))
 
 # Regex Constants
 _HEX_PATTERN = re.compile(r"^0x[0-9a-f]+$", flags=re.I)
-_LIB_PATTERN = re.compile(r"^[a-z0-9_\-\.]+\.lib$", flags=re.I)
 _CALLING_CONV_PATTERN = re.compile(r"\b(__stdcall|__cdecl|__fastcall|WINAPI|APIENTRY|CALLBACK|CDECL|STDMETHODCALLTYPE|STDAPICALLTYPE)\b", flags=re.I)
 _SIGNATURES_BLOCK_PATTERN = re.compile(r"//\s*@signatures-start(.*?)(?://\s*@signatures-end)", flags=re.S | re.I)
 _HOOK_TAG_PATTERN = re.compile(r"//\s*@(?!signatures\b)(\w+)-start", flags=re.I)
@@ -101,10 +100,6 @@ def load_engines(config_path=DEFAULT_ENGINES_CONFIG):
             extra_libs = engine_data.setdefault("extra_libs", [])
             if not isinstance(extra_libs, list) or not all(isinstance(l, str) for l in extra_libs):
                 raise ValueError(f"Engine '{engine_name}' under paradigm '{paradigm}' 'extra_libs' must be a list of strings.")
-                
-            for lib in extra_libs:
-                if not _LIB_PATTERN.match(lib):
-                    raise ValueError(f"Engine '{engine_name}' extra_libs item '{lib}' is invalid. Must only contain alphanumeric characters, dash, underscore, dot, and end with '.lib'.")
     
             loaded_engines[p_lower][engine_name.lower()] = engine_data
         
@@ -168,9 +163,7 @@ def analyze_type(clang_type, name):
 
     return {
         "pointer_depth": depth,
-        "underlying_type": underlying_spelling,
         "is_char_ptr": is_char_ptr,
-        "is_deref": is_deref,
         "safe_read_expr": expr,
         "safe_type": safe_type
     }

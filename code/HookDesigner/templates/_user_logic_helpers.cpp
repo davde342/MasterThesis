@@ -16,16 +16,16 @@ struct RecursionHookGuard {
 };
 
 {% if need_active_counter %}
-static std::atomic<int> g_ActiveHooks{0};
+static std::atomic<int> activeThreads{0};
 
 // RAII helper to track active hook execution count
 struct HookActiveThreads {
     bool active;
-    HookActiveThreads() : active(true) { g_ActiveHooks++; }
-    ~HookActiveThreads() { if (active) g_ActiveHooks--; }
+    HookActiveThreads() : active(true) { activeThreads++; }
+    ~HookActiveThreads() { if (active) activeThreads--; }
     void Release() {
         if (active) {
-            g_ActiveHooks--;
+            activeThreads--;
             active = false;
         }
     }

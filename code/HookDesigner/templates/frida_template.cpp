@@ -159,7 +159,7 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
     DWORD start = GetTickCount();
     while (GetTickCount() - start < 2000) {
         {% if has_noreturn %}
-        if (gum_interceptor_flush(interceptor) && g_ActiveHooks.load() == 0) {
+        if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0) {
         {% else %}
         if (gum_interceptor_flush(interceptor)) {
         {% endif %}
