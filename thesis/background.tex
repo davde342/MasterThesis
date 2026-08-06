@@ -140,7 +140,7 @@ A standard inline hook consists of three primary logical components:
 	Conceptually, the trampoline is a dynamically allocated, executable memory buffer that must fulfills two architectural mandates: it securely relocates the displaced prologue instructions and unconditionally routes the instruction pointer back to the unpatched remainder of the target function.
 \end{enumerate}
 
-The manner in which these frameworks handle the CPU state, the \ac{ABI} constraints and the Trampoline defines their underlying architecture.
+The manner in which these frameworks handle the CPU state, the \ac{ABI} constraints and the hook execution flow defines their underlying architecture.
 \subsection{Bare-Metal Hooking: Microsoft Detours and MinHook}
 Frameworks like Microsoft Detours and MinHook are specifically designed for Windows x86/x64 and utilize a \emph{``bare-metal'' routing} approach.
 In this model, the hooking library has zero awareness of the CPU state or context at runtime.
@@ -198,66 +198,107 @@ Here, we intercept the user's choice (\texttt{result}), forcing a ``yes'' outcom
 	}
 \end{lstlisting}
 
-\subsection{Context-Aware Routing: Frida-Gum}
-Frida-Gum is the underlying C library of the Frida instrumentation toolkit, representing a modern approach to cross-platform instrumentation (X86/X64, ARM/ARM64, MIPS).
+\subsection{Cross-Platform Hooking: Frida-Gum}
+\label{subsec:frida_arch}
+Frida-Gum is the underlying low-level C library of the Frida instrumentation toolkit, representing a modern, multi-architecture approach to dynamic binary instrumentation (supporting x86/x64, ARM/ARM64, MIPS).
 
-In contrast to bare-metal routing, Frida-Gum utilizes \emph{``Context-Aware Routing.''} When a hook is triggered, the framework jumps not directly to the custom payload, but into a dynamically allocated memory block containing instructions that save all CPU registers into a hardware-agnostic structure (\texttt{GumInvocationContext}) before invoking the payload.
+At the core of Frida-Gum's Interceptor engine is a centralized execution dispatcher: when an intercepted target function is invoked, execution jumps not directly to the detour function, but into a dynamically generated entry thunk, that saves the CPU state into an architecture-agnostic \texttt{GumCpuContext} structure and trigger the dispatcher, that automatically orchestrate the hook execution flow.
 
-After the hooking callbacks execute, these saved values are used to restore the CPU state exactly as it was prior to the hook, preventing process crashes.
-This context awareness normalizes the \ac{ABI} and abstracts the target process architecture.
-The developer could not define strict C++ function signatures;
-arguments and return values are accessed and modified dynamically by their index, regardless of the target process architecture.
+Unlike traditional single-paradigm frameworks like Detours or MinHook, Frida-Gum provides a flexible, dual-paradigm Interceptor \ac{API} comprising \emph{Invocation Listener Mode} and \emph{Function Replacement Mode}
+
+\subsubsection{Invocation Listener Mode}
+Using this mode, the developer only needs to specify the \texttt{on\_enter} (injected logic before the original function) and \texttt{on\_leave} (injected logic after the original function), without worrying about defining strict C++ function signatures, since Frida-Gum wraps the captured \texttt{GumCpuContext} inside a high-level \texttt{GumInvocationContext} handle passed to user callbacks. In this way arguments and return values can be accessed and modified dynamically by their index, regardless of the target process architecture.
 
 Due to these architectural differences, the implementation significantly diverges from that of Detours and MinHook.
-The developer only needs to specify the \texttt{on\_enter} and \texttt{on\_leave} hooking callbacks: \texttt{on\_enter} executes before the target function, while \texttt{on\_leave} executes after it finishes.
-The Frida-Gum equivalent code for altering the behavior of \texttt{MessageBoxW} is implemented in \cref{lst:frida}.
+The Frida-Gum Invocation Listener implementation for intercepting \texttt{MessageBoxW} is illustrated in \cref{lst:frida}.
 
-\begin{lstlisting}[language=C, caption={Frida-Gum \texttt{on\_enter}/\texttt{on\_leave} for hooking MessageBoxW.}, label={lst:frida}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-	// Pre-logic
+\begin{lstlisting}[language=C, caption={Frida-Gum Invocation Listener mode (\texttt{on\_enter}/\texttt{on\_leave}) for \texttt{MessageBoxW}.}, label={lst:frida}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+	// Pre-execution callback
 	static void
-	example_listener_on_enter (GumInvocationContext * ic,
-	gpointer user_data)
+	example_listener_on_enter (GumInvocationContext * ic, gpointer user_data)
 	{
-		// The arguments for MessageBoxW are 0-indexed:
-		// 0: HWND hWnd
-		// 1: LPCWSTR lpText
-		// 2: LPCWSTR lpCaption
-		// 3: UINT uType
-		
-		// Frida-Gum allows contextual argument extraction without strict C signatures
+		// Arguments accessed by index: 0:hWnd, 1:lpText, 2:lpCaption, 3:uType
 		guint originalType = GPOINTER_TO_UINT (gum_invocation_context_get_nth_argument (ic, 3));
 		guint modifiedType = MB_YESNO;
-		
 		static const wchar_t* customCaption = L"Hooked, choose:";
 		
 		gum_invocation_context_replace_nth_argument (ic, 2, (gpointer) customCaption);
 		gum_invocation_context_replace_nth_argument (ic, 3, GUINT_TO_POINTER (modifiedType));
 	}
 	
-	// Post-logic
+	// Post-execution callback
 	static void
-	example_listener_on_leave (GumInvocationContext * ic,
-	gpointer user_data)
+	example_listener_on_leave (GumInvocationContext * ic, gpointer user_data)
 	{
 		int result = GPOINTER_TO_INT (gum_invocation_context_get_return_value (ic));
 		if (result == IDNO) 
 		{
-			g_print ("Intercepted IDNO (No). Changing result to IDYES (Yes)\n");
+			g_print ("Intercepted IDNO. Changing result to IDYES\n");
 			gum_invocation_context_replace_return_value (ic, GINT_TO_POINTER (IDYES));
-		}
-		else if (result == IDYES)
-		{
-			g_print ("Intercepted IDYES (Yes). Nothing to do\n");
 		}
 	}
 \end{lstlisting}
 
-\subsection{Passive vs. Active Trampoline Architectures}
+While Invocation Listener Mode offers architecture abstraction, it introduces an inherent limitation under specific calling conventions (such as the Windows x64 \ac{ABI}): because the API for accessing arguments  (\texttt{gum\_invocation\_context\_get\_nth\_argument}) index exclusively into General-Purpose Registers (\texttt{RCX}, \texttt{RDX}, \texttt{R8}, \texttt{R9}), parameter extraction fails for functions receiving floating-point values, which are passed via vector registers (\texttt{XMM0}--\texttt{XMM3}).
 
-While all the presented frameworks utilize inline prologue patching, their trampoline architectures are fundamentally opposed.
-Detours and MinHook utilize a \emph{Passive Trampoline}, strictly acting as a repository for displaced instructions and forcing the user's hook to act as the primary execution controller (the developer's C++ code manually calls the Trampoline).
+\subsubsection{Function Replacement Mode}
+To overcome the limitations of index-based parameter extraction and achieve parity with bare-metal frameworks, Frida-Gum exposes \emph{Function Replacement Mode} via \texttt{gum\_interceptor\_replace} and \texttt{gum\_interceptor\_replace\_fast}.
 
-Conversely, Frida-Gum utilizes an \emph{Active Trampoline}: when the target function is intercepted, execution jumps directly into the trampoline, which assumes total control of execution routing and register preservation, as depicted in \cref{fig:instrumentation_comparison} (with the Detour/MinHook flow shown in \cref{fig:Det} and the Frida-Gum flow in \cref{fig:Frida}):
+\begin{enumerate}
+	\item \textbf{Standard Replacement (\texttt{gum\_interceptor\_replace}):} Execution passes through Frida-Gum's \texttt{enter\_thunk}, where \texttt{GumCpuContext} captures the CPU state and increments \texttt{trampoline\_usage\_counter} (identical to Invocation Listener Mode). However, instead of invoking high-level callback listeners and then jumping to the original function, the dispatcher redirects execution to a user-defined replacement function—acting as a standard C/C++ detour payload similar to Detours or MinHook. Crucially, all CPU registers (including \texttt{XMM0}--\texttt{XMM7}) are restored prior to entering the replacement function, allowing the host C/C++ compiler to handle vector parameter passing natively via standard C signatures.
+	\item \textbf{Fast Replacement (\texttt{gum\_interceptor\_replace\_fast}):} Emits a direct assembly \texttt{JMP} instruction from the target prologue straight to the replacement function, bypassing Frida-Gum's dispatcher and \texttt{GumCpuContext} creation entirely, yielding an execution flow identical to bare-metal frameworks like Detours and MinHook.
+\end{enumerate}
+
+The equivalent Function Replacement implementation for \texttt{MessageBoxW} is illustrated in \cref{lst:frida_replace}.
+
+\begin{lstlisting}[language=C++, caption={Frida-Gum Function Replacement mode using native C/C++ prototypes.}, label={lst:frida_replace}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+	// Function pointer type definition matching target signature
+	typedef int (WINAPI * TrueMessageBoxW_t)(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType);
+	static TrueMessageBoxW_t TrueMessageBoxW = NULL;
+
+	// Strongly-typed C++ Detour Function
+	int WINAPI HookedMessageBoxW(HWND hWnd, LPCWSTR lpText, LPCWSTR lpCaption, UINT uType)
+	{
+		static const wchar_t* customCaption = L"Hooked, choose:";
+		UINT modifiedType = MB_YESNO;
+
+		// Call original implementation via trampoline
+		int result = TrueMessageBoxW(hWnd, lpText, customCaption, modifiedType);
+
+		if (result == IDNO)
+			result = IDYES;
+
+		return result;
+	}
+
+	// Attachment via Standard Replacement Mode
+	gum_interceptor_replace(interceptor,
+		GSIZE_TO_POINTER(gum_module_find_export_by_name(NULL, "MessageBoxW")),
+		(gpointer)HookedMessageBoxW,
+		NULL,
+		(gpointer*)&TrueMessageBoxW);
+	
+	// or Attachment via Fast Replacement Mode
+	gum_interceptor_replace_fast(interceptor,
+		GSIZE_TO_POINTER(gum_module_find_export_by_name(NULL, "MessageBoxW")),
+		(gpointer)HookedMessageBoxW,
+		(gpointer*)&TrueMessageBoxW);
+	
+	
+	
+\end{lstlisting}
+
+\subsection{Passive vs. Active Hook Execution Orchestration}
+
+While all the presented frameworks utilize inline prologue patching, the way in which engine orchestrates Hook execution flow significantly differs:
+
+\begin{itemize}
+	\item \textbf{Passive Orchestration (Detours, MinHook, Frida Fast Replacement):} Overwrites the target prologue with a direct assembly jump (\texttt{JMP}) to the injected payload. The engine acts purely as a passive observer, delegating all execution routing and state management to the user written detour function.
+	
+	\item \textbf{Active Orchestration (Frida Listener \& Standard Replacement Mode):} Execution jumps into a framework-managed dispatcher. It automatically orchestrates CPU register serialization (\texttt{GumCpuContext}), and optional entry callbacks before transferring control to the target or replacement function.
+\end{itemize}
+
+To visually illustrate these operational differences, \cref{fig:instrumentation_comparison} contrasts the direct, user-managed routing (\cref{fig:Det}) with the dispatcher-mediated execution path  (\cref{fig:Frida}).
 
 \begin{figure}[H]
 	\centering
@@ -269,7 +310,7 @@ Conversely, Frida-Gum utilizes an \emph{Active Trampoline}: when the target func
 		\label{fig:Det}
 	\end{subfigure}
 	
-	\vspace{1em} % Add some vertical space between the stacked images
+	\vspace{1em} 
 	
 	\begin{subfigure}{0.98\textwidth}
 		\centering
@@ -278,9 +319,26 @@ Conversely, Frida-Gum utilizes an \emph{Active Trampoline}: when the target func
 		\label{fig:Frida}
 	\end{subfigure}
 	
-	\caption{A comparison between the different architectures and roles of the Trampoline}
+	\caption{A comparison of the different Hook execution flow}
 	\label{fig:instrumentation_comparison}
 \end{figure}
+
+\subsubsection{Advantages of Active Orchestration}
+Frida-Gum employs active dispatchers in both Invocation Listener and Standard Replacement mode to deliver useful capabilities that traditional bare-metal frameworks do not automatically provide:
+
+\begin{enumerate}
+	\item \textbf{Multi-Listener Hook:} With Detours or MinHook, developers are forced to manage fragile, nested chains of function pointers when multiple hooks target the same function. In contrast, Frida-Gum's active dispatcher maintains an internal list of subscribers (\texttt{listener\_entries}) inside target related internal structure  \texttt{GumFunctionContext}. The active dispatcher sequentially invokes the \texttt{on\_enter} and \texttt{on\_leave} callbacks of all attached listeners (e.g., logging, security monitoring, fault injection) in a single execution pass without requiring individual listeners to be aware of one another.
+	
+	\item \textbf{Thread-Safe Ejection Synchronization (\texttt{gum\_interceptor\_flush}):} An issue in inline hooking is unmapping a payload DLL while a descheduled worker thread is executing inside hook code. The active dispatcher solves this automatically by atomically incrementing \texttt{trampoline\_usage\_counter} stored within the \texttt{GumFunctionContext} object upon entry (\texttt{enter\_thunk}) and decrementing it upon completion (\texttt{leave\_thunk}), representing the effective number of threads within the Hook logic. During detachment, calling \texttt{gum\_interceptor\_flush()} verifies that this counter has dropped to zero (\texttt{trampoline\_usage\_counter == 0}), guaranteeing that all in-flight worker threads have exited hook logic before safely restoring original bytes and unmapping memory.
+	
+	\item \textbf{Automatic CPU State Preservation and Register Safety:} In bare-metal hooking, register preservation relies entirely on compiler-generated prologues matching the exact target ABI; any convention mismatch risks register corruption and crashes. In contrast, Frida-Gum's active dispatcher automatically serializes all CPU hardware registers into an architecture-agnostic \texttt{GumCpuContext} structure upon entry and restores them upon exit. Exposed to callbacks via \texttt{gum\_invocation\_context\_get\_cpu\_context(ic)}, this mechanism guarantees process state integrity across supported architectures while allowing developers to safely inspect, log, or modify General-Purpose Registers dynamically at runtime.
+\end{enumerate}
+
+\subsubsection{Architectural Trade-offs and the Fast Replacement Bypass}
+
+Despite their capabilities, active orchestration and  introduce a non-trivial performance trade-off. Execution through the framework's centralized dispatcher (\texttt{enter\_thunk}) requires allocating memory for context structures and executing multiple CPU register serializations on every function invocation. For high-frequency target routines executed millions of times per second (e.g., memory allocations or critical section acquisitions), this additional CPU overhead can degrade execution speed compared to bare-metal passive jumps.
+
+This latency penalty explains the primary role of Frida-Gum's \emph{Fast Replacement Mode} (\texttt{gum\_interceptor\_replace\_fast}). By emitting a raw assembly \texttt{JMP} instruction directly from the target prologue to the replacement payload, fast replacement bypasses the \texttt{enter\_thunk} dispatcher and \texttt{GumCpuContext} creation entirely. This design trades listener chaining and context serialization for bare-metal execution speed and minimal latency.
 
 \subsection{Instruction Boundaries and the Role of Disassemblers}
 
@@ -364,30 +422,47 @@ If a thread's \ac{IP} is detected within the address range of the code being rep
 	//or MH_DisableHook(MH_ALL_HOOKS); if we have more than one hook
 \end{lstlisting}
 
-\emph{Frida-Gum} employs an identical safety mechanism through its Interceptor \ac{API}, which is presented in \cref{lst:frida_lifecycle}.
+\emph{Frida-Gum} employs a similar transactional safety model through its Interceptor \ac{API}, as presented in \cref{lst:frida_lifecycle}. During attach and detach phases, atomic transaction boundaries (\texttt{gum\_interceptor\_begin\_transaction} / \texttt{end\_transaction}) batch memory patch modifications, which can be combined with explicit OS worker thread suspension (\texttt{SuspendThread} / \texttt{ResumeThread}) to eliminate patch-time race conditions.
 
-\begin{lstlisting}[language=C, caption={Frida-Gum utilizing transaction boundaries for hook management.}, label={lst:frida_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+\begin{lstlisting}[language=C++, caption={Frida-Gum transactional lifecycle for Function Replacement and Invocation Listener modes.}, label={lst:frida_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 	// --- SAFE ATTACHMENT ---
-	gum_interceptor_begin_transaction (interceptor);
-	gum_interceptor_attach (interceptor,
-	GSIZE_TO_POINTER (gum_module_find_export_by_name (user32, "MessageBoxW")),
-	listener,
-	NULL,
-	GUM_ATTACH_FLAGS_NONE);
-	// here we specify possible other hooks we want to inject...
+	std::vector<HANDLE> threads = EnlistAllThreads();
+	for (HANDLE h : threads) SuspendThread(h);
+
+	gum_interceptor_begin_transaction(interceptor);
 	
-	gum_interceptor_end_transaction (interceptor);
-	// Threads are paused and patches applied
+	// Function Replacement Mode (bare-metal function replacement)
+	gum_interceptor_replace(interceptor, target_func, (gpointer)HookedFunc, NULL, (gpointer*)&TrueFunc);
 	
+	gum_interceptor_replace_fast(...)
+	
+	// OR Invocation Listener Mode 
+	// gum_interceptor_attach(interceptor, target_func, listener, NULL, GUM_ATTACH_FLAGS_NONE);
+
+	gum_interceptor_end_transaction(interceptor);
+
+	for (HANDLE h : threads) { ResumeThread(h); CloseHandle(h); }
+
 	// --- SAFE DETACHMENT ---
-	gum_interceptor_begin_transaction (interceptor);
+	threads = EnlistAllThreads();
+	for (HANDLE h : threads) SuspendThread(h);
+
+	gum_interceptor_begin_transaction(interceptor);
 	
-	gum_interceptor_detach (interceptor, listener);
-	// here we specify possible other hooks we want to detach...
+	// Function Replacement Mode
+	gum_interceptor_revert(interceptor, target_func);
 	
-	gum_interceptor_end_transaction (interceptor);
-	// Threads are paused and bytes restored
+	// OR Invocation Listener Mode
+	// gum_interceptor_detach(interceptor, listener);
+
+	gum_interceptor_end_transaction(interceptor);
+
+	for (HANDLE h : threads) { ResumeThread(h); CloseHandle(h); }
 \end{lstlisting}
+
+During the \emph{detachment phase}, restoring the target function's original prologue bytes prevents \emph{new} executions from entering the hook payload. However, transactional byte restoration alone is insufficient to guarantee safe \ac{DLL} ejection (\texttt{FreeLibrary}). In multi-threaded applications, worker threads may already be executing inside the custom detour logic when prologue reversion occurs. If the host process unmaps the instrumentation \ac{DLL} memory while a worker thread is active inside the hook logic, the thread encounters unmapped virtual memory, triggering an immediate Access Violation (\texttt{0xC0000005}).
+
+To achieve thread-safe ejection, inline hooking architectures must supplement transactional byte restoration with a \emph{Synchronization Protocol}. This protocol needs to tracks active worker threads executing within the hook scope  and enforces a spin-wait period during detachment, ensuring all in-flight threads completely exit the hook payload before freeing resources and unmapping the binary module.
 
 \subsection{Summary of Inline Hooking Frameworks}
 To conclude the discussion on inline hooking, \cref{tab:inline_frameworks_comparison} provides a summary comparison of the three analyzed frameworks: Microsoft Detours, MinHook, and Frida-Gum.
@@ -395,19 +470,17 @@ To conclude the discussion on inline hooking, \cref{tab:inline_frameworks_compar
 \begin{table}[H]
 	\centering
 	\small
-	\begin{tabular}{p{5.75cm}p{3.1cm}p{3.1cm}p{3.6cm}}
+	\begin{tabular}{p{4.5cm}p{3.3cm}p{3.3cm}p{4.2cm}}
 		\toprule
 		\textbf{Feature} & \textbf{Detours} & \textbf{MinHook} & \textbf{Frida-Gum} \\
 		\midrule
-		\textbf{Paradigm} & Bare-Metal & Bare-Metal & Context-Aware \\
+		\textbf{CPU State Preservation} & Manual (Compiler) & Manual (Compiler) & Automatic (\texttt{GumCpuContext}) / Compiler \\
 		\addlinespace
-		\textbf{State Preservation} & Manual (Compiler) & Manual (Compiler) & Automatic (GumInvocationContext) \\
+		\textbf{Hook Orchestration} & Passive (User-controlled) & Passive (User-controlled) & Active Dispatcher (\texttt{attach}) / Passive (\texttt{replace}) \\
 		\addlinespace
-		\textbf{Trampoline} & Passive (User-controlled) & Passive (User-controlled) & Active (Framework-controlled) \\
+		\textbf{ABI Constraints} & Strict (Requires C/C++ prototypes) & Strict (Requires C/C++ prototypes) & Abstracted (\texttt{attach}) / Strict (\texttt{replace}) \\
 		\addlinespace
 		\textbf{Disassembler} & Proprietary LDE & HDE32 / HDE64 & Capstone (full semantic decoder) \\
-		\addlinespace
-		\textbf{Safe Attachment/Detachment} & Explicit Transactions & Implicit / Internal Sync & Interceptor Transactions \\
 		\addlinespace
 		\textbf{Architectures} & x86, x64 & x86, x64 & x86, x64, ARM, ARM64, MIPS \\
 		\bottomrule
@@ -567,7 +640,7 @@ The equivalent branch-logging example seen previously for PIN is implemented in 
 \end{lstlisting}
 
 Using DynamoRIO, developers can directly manipulate the instruction flow.
-In PIN, developers generally ``wra'' existing instructions (adding a call before or after an instruction) but cannot easily modify the instruction itself. 
+In PIN, developers generally ``wrap'' existing instructions (adding a call before or after an instruction) but cannot easily modify the instruction itself. 
 In DynamoRIO, the developer is handed a linked list of instructions (\texttt{instrlist\_t}) and can easily manipulate or modify them (e.g., reordering them or moving a load instruction earlier to test for race condition).
 
 Furthermore, because PIN is designed to be highly opaque, using \texttt{INS\_InsertCall} prompts PIN's \ac{JIT} compiler to automatically analyze the custom analysis function for deciding which registers need to be saved and restored based on what the C++ code actually uses. 
@@ -672,7 +745,7 @@ The experimental activity was structured into three different scenarios, each de
 	
 	\item \textbf{Implemented Mitigations:} To address the detachment race condition, an RAII-based safety synchronization primitive (\texttt{HookGuard}) was implemented using an atomic execution counter (\texttt{g\_ActiveHooks}), for keeping track of threads inside the Hook logic; during \texttt{DLL\_PROCESS\_DETACH}, the payload enters a spin-wait loop and a grace period (\texttt{Sleep}/\texttt{SwitchToThread}) to ensure all threads exit the hook scope before module unloading. 
 	
-	To bypass the floating-point register limitation in Frida-Gum, the high-level callback attachment was discarded in favor of full function replacement (code become similar to Detours/MinHook) via \texttt{gum\_\allowbreak interceptor\_\allowbreak replace}, to let the compiler handle the exact register alignment natively.
+	As detailed in \cref{subsec:frida_arch}, to bypass the floating-point register limitation inherent in Frida-Gum's Invocation Listener mode, the high-level callback attachment was discarded in favor of Frida-Gum's Function Replacement mode via \texttt{gum\_\allowbreak interceptor\_\allowbreak replace}, allowing the C/C++ compiler to handle exact register allocation natively.
 \end{itemize}
 
 \subsection{Scenario 3: Instruction-Level Assembly Tracking via DBI Engines}
