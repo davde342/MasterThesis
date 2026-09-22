@@ -48,7 +48,32 @@ static True{{ hook.function_name }}_t True{{ hook.function_name }} = nullptr;
 }
 {% endfor %}
 
+// Enlist all thread handles to suspend/resume during Detours transactions
+static std::vector<HANDLE> EnlistAllThreads() {
+    std::vector<HANDLE> threadHandles;
+    DWORD currentProcessId = GetCurrentProcessId();
+    DWORD currentThreadId = GetCurrentThreadId();
 
+    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (hSnapshot == INVALID_HANDLE_VALUE) {
+        return threadHandles;
+    }
+
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+    if (Thread32First(hSnapshot, &te)) {
+        do {
+            if (te.th32OwnerProcessID == currentProcessId && te.th32ThreadID != currentThreadId) {
+                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
+                if (hThread) {
+                    threadHandles.push_back(hThread);
+                }
+            }
+        } while (Thread32Next(hSnapshot, &te));
+    }
+    CloseHandle(hSnapshot);
+    return threadHandles;
+}
 
 // Attach / Detach Transactions
 extern "C" __declspec(dllexport) void InitializeHooks() {
@@ -111,7 +136,7 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
     if (g_Ejected) return TRUE;
 
     if (g_HooksAttached) {
-        // 1. Stop background HTTP server thread first so Civetweb worker thread exits select()
+        // 1. Stop background HTTP server thread first so Civetweb worker thread exits
         {% if telemetry and telemetry.metrics == "prometheus" %}
         g_PromExposer.reset();
         {% endif %}
@@ -181,4 +206,5 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
     return g_Ejected;
 }
 
+#define HOOK_DLLMAIN_ATTACH_PRECHECK() if (DetourIsHelperProcess()) return TRUE
 {% include "_dllmain.cpp" %}

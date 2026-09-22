@@ -1,12 +1,16 @@
-{% set need_active_counter = (engine == 'detours') or has_noreturn %}
-
 static DWORD g_TlsIndex = TLS_OUT_OF_INDEXES;
 
 // RAII helper to prevent recursive hook execution on the same thread
 struct RecursionHookGuard {
     bool active;
-    RecursionHookGuard() : active(true) { TlsSetValue(g_TlsIndex, (LPVOID)1); }
-    ~RecursionHookGuard() { if (active) TlsSetValue(g_TlsIndex, (LPVOID)0); }
+    RecursionHookGuard() : active(false) { Acquire(); }
+    ~RecursionHookGuard() { Release(); }
+    void Acquire() {
+        if (!active) {
+            TlsSetValue(g_TlsIndex, (LPVOID)1);
+            active = true;
+        }
+    }
     void Release() {
         if (active) {
             TlsSetValue(g_TlsIndex, (LPVOID)0);
@@ -15,7 +19,6 @@ struct RecursionHookGuard {
     }
 };
 
-{% if need_active_counter %}
 static std::atomic<int> activeThreads{0};
 
 // RAII helper to track active hook execution count
@@ -30,7 +33,6 @@ struct HookActiveThreads {
         }
     }
 };
-{% endif %}
 
 #include "{{ logic_file_rel }}"
 
@@ -43,6 +45,18 @@ static std::string CopyString(const char* source, size_t maxChars = 128) {
     return std::string(source, len);
 }
 
+// CopyString overload that copy wide string safely and convert to UTF-8 std::string
+static std::string CopyString(const wchar_t* source, size_t maxChars = 128) {
+    if (!source) return "null";
+    size_t len = wcsnlen(source, maxChars);
+    if (len == 0) return std::string();
+    int sizeNeeded = WideCharToMultiByte(CP_UTF8, 0, source, (int)len, NULL, 0, NULL, NULL);
+    if (sizeNeeded <= 0) return std::string();
+    std::string result(sizeNeeded, 0);
+    WideCharToMultiByte(CP_UTF8, 0, source, (int)len, &result[0], sizeNeeded, NULL, NULL);
+    return result;
+}
+
 // Dereference pointer safely (memory violations will be caught by outer catch(...))
 template <typename T>
 static T ReadPointer(const T* ptr, T fallback = T()) {
@@ -50,31 +64,4 @@ static T ReadPointer(const T* ptr, T fallback = T()) {
         return fallback;
     }
     return *ptr;
-}
-
-// Enlist all thread handles to suspend/resume during transaction operations
-static std::vector<HANDLE> EnlistAllThreads() {
-    std::vector<HANDLE> threadHandles;
-    DWORD currentProcessId = GetCurrentProcessId();
-    DWORD currentThreadId = GetCurrentThreadId();
-
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
-        return threadHandles;
-    }
-
-    THREADENTRY32 te;
-    te.dwSize = sizeof(te);
-    if (Thread32First(hSnapshot, &te)) {
-        do {
-            if (te.th32OwnerProcessID == currentProcessId && te.th32ThreadID != currentThreadId) {
-                HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_SET_CONTEXT, FALSE, te.th32ThreadID);
-                if (hThread) {
-                    threadHandles.push_back(hThread);
-                }
-            }
-        } while (Thread32Next(hSnapshot, &te));
-    }
-    CloseHandle(hSnapshot);
-    return threadHandles;
 }

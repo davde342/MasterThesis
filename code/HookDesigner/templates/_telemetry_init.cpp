@@ -75,7 +75,7 @@
               .Help("{{ hist.description }}")
               .Register(*g_PromRegistry);
           {% if not hist.cpp_label %}
-          g_PromMetric_{{ hook.function_name }}_{{ hist.name }} = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"function", "{{ hook.function_name }}"} }, std::vector<double>{ {%- for b in hist.buckets -%}{{ b }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%} });
+          g_PromMetric_{{ hook.function_name }}_{{ hist.name }} = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"function", "{{ hook.function_name }}"} }, g_PromBuckets_{{ hook.function_name }}_{{ hist.name }});
           {% endif %}
           {% endfor %}
         {% endfor %}

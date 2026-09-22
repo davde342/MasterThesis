@@ -44,6 +44,12 @@ METRIC_CONFIGS = {
     "histograms": {"has_value": True,  "has_buckets": True},
 }
 
+# required fields per paradigm
+PARADIGM_SCHEMAS = {
+    "inline_hook": ["template", "cast_format", "libs_arg", "inc_arg"],
+    "default":     ["template", "libs_arg", "inc_arg"]
+}
+
 # C++ Preamble for clang to understand Windows macros
 CPP_PREAMBLE = """
 #define WINAPI __stdcall
@@ -71,12 +77,6 @@ def load_engines(config_path=DEFAULT_ENGINES_CONFIG):
         
     if not isinstance(data, dict):
         raise ValueError(f"Engine configuration from '{config_path}' must be a dictionary.")
-        
-    # required fields per paradigm
-    PARADIGM_SCHEMAS = {
-        "inline_hook": ["template", "cast_format", "libs_arg", "inc_arg"],
-        "default":     ["template", "libs_arg", "inc_arg"]
-    }
         
     loaded_engines = {}
     for paradigm, engines_data in data.items():
@@ -148,22 +148,19 @@ def analyze_type(clang_type, name):
         not underlying_spelling.startswith("union ")
     )
 
-    if depth == 0 or is_char_ptr:
-        expr = name
-        safe_type = "std::string" if is_char_ptr else raw_type_spelling
-    elif depth == 1 and not is_deref:
-        expr = name
+    expr = name
+
+    if is_char_ptr:
+        expr = f"CopyString({name})"
+        safe_type = "std::string"
+    elif depth == 0 or not is_deref:
         safe_type = raw_type_spelling
     else:
-        # depth >= 2 (always safe) or depth == 1 with dereferenceable type
-        expr = name
         for _ in range(depth):
             expr = f"ReadPointer({expr})"
         safe_type = underlying_spelling
 
     return {
-        "pointer_depth": depth,
-        "is_char_ptr": is_char_ptr,
         "safe_read_expr": expr,
         "safe_type": safe_type
     }
@@ -173,7 +170,8 @@ def parse_signatures_file(combined_content, tu):
 
     m = _SIGNATURES_BLOCK_PATTERN.search(combined_content)
     if not m:
-        raise ValueError("Could not find the signatures block in logic file. Ensure you use '// @signatures-start' and '// @signatures-end' markers.")
+        raise ValueError("Could not find the signatures block in logic file.\n"
+                         "Ensure you use '// @signatures-start' and '// @signatures-end' markers.")
 
     start_line = combined_content.count('\n', 0, m.start()) + 1
     end_line = start_line + combined_content.count('\n', m.start(), m.end())
@@ -224,10 +222,6 @@ def validate_telemetry_var(prefix, target, hook, input_vars_needed, output_vars_
     
     if prefix == "input":
         input_vars_needed.add(target)
-        # We also mark output_vars_needed so that output_<param> is declared and initialized
-        # to input_<param> in _hook_body.cpp, allowing log rules to compile cleanly.
-        if is_noreturn:
-            output_vars_needed.add(target)
     elif prefix == "output":
         output_vars_needed.add(target)
 
@@ -246,13 +240,7 @@ def parse_hook_implementations(combined_content, tu):
             loc = node.location
             if loc.file and loc.file.name == 'logic_file.cpp':
                 if node.spelling in expected_hooks:
-                    params = []
-                    for arg in node.get_arguments():
-                        params.append({
-                            "type": arg.type.spelling,
-                            "name": arg.spelling
-                        })
-                    hooks_map[node.spelling] = params
+                    hooks_map[node.spelling] = [arg.spelling for arg in node.get_arguments()]
     #check if we found all of them
     missing = expected_hooks - set(hooks_map.keys())
     if missing:
@@ -277,59 +265,35 @@ def extract_engines_from_config(config):
 
 
 
-def translate_telemetry_expr(expr, hook, input_vars_needed, output_vars_needed, check_latency=False):
+def translate_telemetry_expr(expr, hook, input_vars_needed, output_vars_needed):
     if not expr:
         return expr
-
     func_name = hook["function_name"]
     is_noreturn = hook["is_noreturn"]
     return_type = hook.get("return_type", "")
     perf = hook["behaviors"]["performance_metrics"]
-
-    # Translate thread ID keyword: tid -> GetCurrentThreadId()
-    expr = re.sub(r"\btid\b", "GetCurrentThreadId()", expr)
-
-    # 2. Translate latency keyword: latency -> elapsed_ms_{func_name}
-    if check_latency and re.search(r"\blatency\b", expr):
+    # 1. Translate thread ID wildcard: __hook_tid -> GetCurrentThreadId()
+    expr = re.sub(r"\b__hook_tid\b", "GetCurrentThreadId()", expr)
+    
+    # 2. Translate latency wildcard: __hook_latency -> elapsed_ms_{func_name}
+    if re.search(r"\b__hook_latency\b", expr):
         if is_noreturn:
-            raise ValueError(f"Cannot reference 'latency' in metrics for noreturn function '{func_name}'.")
+            raise ValueError(f"Cannot reference '__hook_latency' for noreturn function '{func_name}'.")
         perf["execution_time"] = True
-        expr = re.sub(r"\blatency\b", f"elapsed_ms_{func_name}", expr)
-
+        expr = re.sub(r"\b__hook_latency\b", f"elapsed_ms_{func_name}", expr)
+    
     # 3. Validate __hook_result with return_type validation
     if re.search(r"\b__hook_result\b", expr):
         if return_type and return_type.lower() == "void":
             raise ValueError(f"Cannot reference '__hook_result' for void function '{func_name}'.")
         if is_noreturn:
             raise ValueError(f"Cannot reference '__hook_result' for noreturn function '{func_name}'.")
-
-    # 5. Parameter reference variable registration & pointer type translation
+    
+    # 4. Parameter reference variable registration
     for var_match in _VAR_RE.finditer(expr):
         prefix = var_match.group(1)
         root_param_name = var_match.group(2)
-        full_param_var = var_match.group(0)
-
         validate_telemetry_var(prefix, root_param_name, hook, input_vars_needed, output_vars_needed)
-
-        # Type-aware pointer translation (for standalone parameter references)
-        after_match = expr[var_match.end():]
-        has_member_access = after_match.startswith("->") or after_match.startswith(".")
-        if not has_member_access:
-            param_info = next((p for p in hook["parameters"] if p["name"] == root_param_name), None)
-            if param_info:
-                if "pointer_depth" not in param_info and "_clang_type" in param_info:
-                    param_info.update(analyze_type(param_info["_clang_type"], param_info["name"]))
-
-                depth = param_info.get("pointer_depth", 0)
-                is_char_ptr = param_info.get("is_char_ptr", False)
-                raw_type = param_info.get("type", "")
-                is_str = is_char_ptr or any(s in raw_type for s in ["std::string", "LPCSTR", "LPWSTR", "PCSTR", "PCWSTR"])
-
-                if not is_str and depth > 0:
-                    safe_expr = param_info.get("safe_read_expr", full_param_var)
-                    replacement = safe_expr.replace(root_param_name, full_param_var) if root_param_name in safe_expr else safe_expr
-                    expr = re.sub(r"\b" + full_param_var + r"\b", replacement, expr)
-
     return expr
 
 def validate_histogram_buckets(buckets_val, context_name):
@@ -400,7 +364,7 @@ def process_log_rules(hook, input_vars_needed, output_vars_needed):
                     else:
                         var_match = _VAR_RE.search(arg)
                         if not var_match:
-                            raise ValueError(f"Log rule '{name}' argument '{arg}' in '{func_name}' must use 'input_' or 'output_' prefix (e.g. 'input_{arg}') or be '__hook_result'.")
+                            raise ValueError(f"Log rule '{name}' argument '{arg}' in '{func_name}' must use 'input_' or 'output_' prefix (e.g. 'input_{arg}') or be '__hook_result'")
                         full_name = var_match.group(0)
                     fmt_parts.append(f"{arg}={{{full_name}}}")
                 fmt = " | ".join(fmt_parts)
@@ -466,7 +430,7 @@ def process_metric_group(metric_list, kind, hook, input_vars_needed, output_vars
             if not isinstance(m["value"], str):
                 raise ValueError(f"Hook '{func_name}' {singular} metric '{name}' at index {idx} 'value' must be a string.")
             
-            m["value"] = translate_telemetry_expr(m["value"], hook, input_vars_needed, output_vars_needed, check_latency=True)
+            m["value"] = translate_telemetry_expr(m["value"], hook, input_vars_needed, output_vars_needed)
 
         m.setdefault("description", "")
         if not isinstance(m["description"], str):
@@ -476,7 +440,7 @@ def process_metric_group(metric_list, kind, hook, input_vars_needed, output_vars
         if not isinstance(m["condition"], str):
             raise ValueError(f"Hook '{func_name}' {singular} metric '{name}' at index {idx} 'condition' must be a string.")
 
-        m["condition"] = translate_telemetry_expr(m["condition"], hook, input_vars_needed, output_vars_needed, check_latency=True)
+        m["condition"] = translate_telemetry_expr(m["condition"], hook, input_vars_needed, output_vars_needed)
 
         if cfg["has_buckets"]:
             m.setdefault("buckets", [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0])
@@ -535,9 +499,9 @@ def process_telemetry(hook, telemetry):
 
     needed_vars = input_vars_needed | output_vars_needed
     for p in hook["parameters"]:
-        if p["name"] in needed_vars and "pointer_depth" not in p and "_clang_type" in p:
+        if p["name"] in needed_vars:
             p.update(analyze_type(p["_clang_type"], p["name"]))
-        p.pop("_clang_type", None)
+        p.pop("_clang_type", None)  # clang type is not needed anymore
 
 def normalize_policy(data):
     if not isinstance(data, dict):
@@ -761,29 +725,35 @@ def validate_policy(data):
 
         sec_policy = hook["behaviors"]["security_policy"]
         pre_hook_name = sec_policy["pre_hook"]
-        post_hook_name = sec_policy["post_hook"]
         pre_hook_params = sec_policy["pre_hook_params"]
-        post_hook_params = sec_policy["post_hook_params"]
-
-        if hook["is_noreturn"] and post_hook_name is not None:
-            raise ValueError(f"Hook '{func_name}' is marked as noreturn but specifies a 'post_hook' '{post_hook_name}'.")
 
         target_param_names = [p["name"] for p in hook.get("parameters", [])]
-        for p in pre_hook_params:
-            p_name = p["name"]
+        for p_name in pre_hook_params:
             if p_name not in target_param_names:
                 raise ValueError(
                     f"Pre-hook '{pre_hook_name}' for hook '{func_name}' references parameter '{p_name}' "
                     f"which does not exist in the target function's parameters: {target_param_names}"
                 )
 
-        # Validate that post_hook_params matches target function parameters
-        for p in post_hook_params:
-            p_name = p["name"]
-            if p_name not in target_param_names:
+        post_hook_name = sec_policy["post_hook"]
+
+        if hook["is_noreturn"] and post_hook_name is not None:
+            raise ValueError(f"Hook '{func_name}' is marked as noreturn but specifies a 'post_hook' '{post_hook_name}'.")
+        
+        post_hook_params = sec_policy["post_hook_params"]
+
+
+
+         # Validate that post_hook_params matches target function parameters or return value
+        has_return_val = hook["return_type"] != "void"
+        allowed_post_params = set(target_param_names)
+        if has_return_val:
+            allowed_post_params.update({"__hook_result", "result"})
+        for p_name in post_hook_params:
+            if p_name not in allowed_post_params:
                 raise ValueError(
                     f"Post-hook '{post_hook_name}' for hook '{func_name}' references parameter '{p_name}' "
-                    f"which does not exist in the target function's parameters "
+                    f"which does not exist in target parameters {target_param_names}"
                 )
 
 def validate_and_parse_policy(policy_path):
@@ -806,7 +776,7 @@ def validate_and_parse_policy(policy_path):
 
     return data
 
-def handle_address_resolution(hook, engine, engine_cfg):
+def handle_address_resolution(hook, engine_cfg):
 
     addr_res = hook["address_resolution"]
     strategy = addr_res["strategy"].lower()
@@ -836,7 +806,7 @@ def generate_cpp_code(policy_data, engine, output_cpp_path):
         raise ValueError(f"Engine config not found for '{engine}'")
 
     for hook in policy_data["hooks"]:
-        hook["address_resolution_cpp"] = handle_address_resolution(hook, engine, engine_cfg)
+        hook["address_resolution_cpp"] = handle_address_resolution(hook, engine_cfg)
 
     templates_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates")
     env = Environment(loader=FileSystemLoader(templates_dir), trim_blocks=True, lstrip_blocks=True)
@@ -856,7 +826,6 @@ def generate_cpp_code(policy_data, engine, output_cpp_path):
 
     rendered_code = template.render(
         hooks=policy_data["hooks"],
-        engine=engine,
         logic_file_rel=logic_file_rel,
         telemetry=telemetry_config
     )
@@ -1088,4 +1057,5 @@ def main():
         return 1
 
 
-sys.exit(main())
+if __name__ == "__main__":
+    sys.exit(main())

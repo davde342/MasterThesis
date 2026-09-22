@@ -32,45 +32,27 @@
             {% if counter.condition != "true" %}
             if ({{ counter.condition }}) {
                 std::string cur_val = {{ counter.cpp_label.expr }};
-                thread_local std::string last_val;
-                thread_local prometheus::Counter* last_ptr = nullptr;
-                thread_local std::unordered_map<std::string, prometheus::Counter*> label_dict;
+                uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+                thread_local uint64_t tl_last_hash_{{ counter.name }} = 0;
+                thread_local prometheus::Counter* tl_last_ptr_{{ counter.name }} = nullptr;
 
-                if (last_ptr && last_val == cur_val) {
-                    last_ptr->Increment();
-                } else {
-                    auto it = label_dict.find(cur_val);
-                    if (it != label_dict.end()) {
-                        last_val = cur_val;
-                        last_ptr = it->second;
-                    } else {
-                        last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ counter.name }}->Add({ {"{{ counter.cpp_label.name }}", cur_val} });
-                        label_dict[cur_val] = last_ptr;
-                        last_val = cur_val;
-                    }
-                    if (last_ptr) last_ptr->Increment();
+                if (tl_last_ptr_{{ counter.name }} == nullptr || tl_last_hash_{{ counter.name }} != cur_hash) {
+                    tl_last_ptr_{{ counter.name }} = &g_PromFamily_{{ hook.function_name }}_{{ counter.name }}->Add({ {"{{ counter.cpp_label.name }}", cur_val} });
+                    tl_last_hash_{{ counter.name }} = cur_hash;
                 }
+                tl_last_ptr_{{ counter.name }}->Increment();
             }
             {% else %}
             std::string cur_val = {{ counter.cpp_label.expr }};
-            thread_local std::string last_val;
-            thread_local prometheus::Counter* last_ptr = nullptr;
-            thread_local std::unordered_map<std::string, prometheus::Counter*> label_dict;
+            uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+            thread_local uint64_t tl_last_hash_{{ counter.name }} = 0;
+            thread_local prometheus::Counter* tl_last_ptr_{{ counter.name }} = nullptr;
 
-            if (last_ptr && last_val == cur_val) {
-                last_ptr->Increment();
-            } else {
-                auto it = label_dict.find(cur_val);
-                if (it != label_dict.end()) {
-                    last_val = cur_val;
-                    last_ptr = it->second;
-                } else {
-                    last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ counter.name }}->Add({ {"{{ counter.cpp_label.name }}", cur_val} });
-                    label_dict[cur_val] = last_ptr;
-                    last_val = cur_val;
-                }
-                if (last_ptr) last_ptr->Increment();
+            if (tl_last_ptr_{{ counter.name }} == nullptr || tl_last_hash_{{ counter.name }} != cur_hash) {
+                tl_last_ptr_{{ counter.name }} = &g_PromFamily_{{ hook.function_name }}_{{ counter.name }}->Add({ {"{{ counter.cpp_label.name }}", cur_val} });
+                tl_last_hash_{{ counter.name }} = cur_hash;
             }
+            tl_last_ptr_{{ counter.name }}->Increment();
             {% endif %}
         }
         {% else %}
@@ -93,45 +75,27 @@
             {% if gauge.condition != "true" %}
             if ({{ gauge.condition }}) {
                 std::string cur_val = {{ gauge.cpp_label.expr }};
-                thread_local std::string last_val;
-                thread_local prometheus::Gauge* last_ptr = nullptr;
-                thread_local std::unordered_map<std::string, prometheus::Gauge*> label_dict;
+                uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+                thread_local uint64_t tl_last_hash_{{ gauge.name }} = 0;
+                thread_local prometheus::Gauge* tl_last_ptr_{{ gauge.name }} = nullptr;
 
-                if (last_ptr && last_val == cur_val) {
-                    last_ptr->Set((double)({{ gauge.value }}));
-                } else {
-                    auto it = label_dict.find(cur_val);
-                    if (it != label_dict.end()) {
-                        last_val = cur_val;
-                        last_ptr = it->second;
-                    } else {
-                        last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ gauge.name }}->Add({ {"{{ gauge.cpp_label.name }}", cur_val} });
-                        label_dict[cur_val] = last_ptr;
-                        last_val = cur_val;
-                    }
-                    if (last_ptr) last_ptr->Set((double)({{ gauge.value }}));
+                if (tl_last_ptr_{{ gauge.name }} == nullptr || tl_last_hash_{{ gauge.name }} != cur_hash) {
+                    tl_last_ptr_{{ gauge.name }} = &g_PromFamily_{{ hook.function_name }}_{{ gauge.name }}->Add({ {"{{ gauge.cpp_label.name }}", cur_val} });
+                    tl_last_hash_{{ gauge.name }} = cur_hash;
                 }
+                tl_last_ptr_{{ gauge.name }}->Set((double)({{ gauge.value }}));
             }
             {% else %}
             std::string cur_val = {{ gauge.cpp_label.expr }};
-            thread_local std::string last_val;
-            thread_local prometheus::Gauge* last_ptr = nullptr;
-            thread_local std::unordered_map<std::string, prometheus::Gauge*> label_dict;
+            uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+            thread_local uint64_t tl_last_hash_{{ gauge.name }} = 0;
+            thread_local prometheus::Gauge* tl_last_ptr_{{ gauge.name }} = nullptr;
 
-            if (last_ptr && last_val == cur_val) {
-                last_ptr->Set((double)({{ gauge.value }}));
-            } else {
-                auto it = label_dict.find(cur_val);
-                if (it != label_dict.end()) {
-                    last_val = cur_val;
-                    last_ptr = it->second;
-                } else {
-                    last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ gauge.name }}->Add({ {"{{ gauge.cpp_label.name }}", cur_val} });
-                    label_dict[cur_val] = last_ptr;
-                    last_val = cur_val;
-                }
-                if (last_ptr) last_ptr->Set((double)({{ gauge.value }}));
+            if (tl_last_ptr_{{ gauge.name }} == nullptr || tl_last_hash_{{ gauge.name }} != cur_hash) {
+                tl_last_ptr_{{ gauge.name }} = &g_PromFamily_{{ hook.function_name }}_{{ gauge.name }}->Add({ {"{{ gauge.cpp_label.name }}", cur_val} });
+                tl_last_hash_{{ gauge.name }} = cur_hash;
             }
+            tl_last_ptr_{{ gauge.name }}->Set((double)({{ gauge.value }}));
             {% endif %}
         }
         {% else %}
@@ -154,47 +118,27 @@
             {% if hist.condition != "true" %}
             if ({{ hist.condition }}) {
                 std::string cur_val = {{ hist.cpp_label.expr }};
-                thread_local std::string last_val;
-                thread_local prometheus::Histogram* last_ptr = nullptr;
-                thread_local std::unordered_map<std::string, prometheus::Histogram*> label_dict;
-                static const std::vector<double> buckets_{{ hook.function_name }}_{{ hist.name }} = { {%- for b in hist.buckets -%}{{ b }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%} };
+                uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+                thread_local uint64_t tl_last_hash_{{ hist.name }} = 0;
+                thread_local prometheus::Histogram* tl_last_ptr_{{ hist.name }} = nullptr;
 
-                if (last_ptr && last_val == cur_val) {
-                    last_ptr->Observe((double)({{ hist.value }}));
-                } else {
-                    auto it = label_dict.find(cur_val);
-                    if (it != label_dict.end()) {
-                        last_val = cur_val;
-                        last_ptr = it->second;
-                    } else {
-                        last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"{{ hist.cpp_label.name }}", cur_val} }, buckets_{{ hook.function_name }}_{{ hist.name }});
-                        label_dict[cur_val] = last_ptr;
-                        last_val = cur_val;
-                    }
-                    if (last_ptr) last_ptr->Observe((double)({{ hist.value }}));
+                if (tl_last_ptr_{{ hist.name }} == nullptr || tl_last_hash_{{ hist.name }} != cur_hash) {
+                    tl_last_ptr_{{ hist.name }} = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"{{ hist.cpp_label.name }}", cur_val} }, g_PromBuckets_{{ hook.function_name }}_{{ hist.name }});
+                    tl_last_hash_{{ hist.name }} = cur_hash;
                 }
+                tl_last_ptr_{{ hist.name }}->Observe((double)({{ hist.value }}));
             }
             {% else %}
             std::string cur_val = {{ hist.cpp_label.expr }};
-            thread_local std::string last_val;
-            thread_local prometheus::Histogram* last_ptr = nullptr;
-            thread_local std::unordered_map<std::string, prometheus::Histogram*> label_dict;
-            static const std::vector<double> buckets_{{ hook.function_name }}_{{ hist.name }} = { {%- for b in hist.buckets -%}{{ b }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%} };
+            uint64_t cur_hash = std::hash<std::string>{}(cur_val);
+            thread_local uint64_t tl_last_hash_{{ hist.name }} = 0;
+            thread_local prometheus::Histogram* tl_last_ptr_{{ hist.name }} = nullptr;
 
-            if (last_ptr && last_val == cur_val) {
-                last_ptr->Observe((double)({{ hist.value }}));
-            } else {
-                auto it = label_dict.find(cur_val);
-                if (it != label_dict.end()) {
-                    last_val = cur_val;
-                    last_ptr = it->second;
-                } else {
-                    last_ptr = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"{{ hist.cpp_label.name }}", cur_val} }, buckets_{{ hook.function_name }}_{{ hist.name }});
-                    label_dict[cur_val] = last_ptr;
-                    last_val = cur_val;
-                }
-                if (last_ptr) last_ptr->Observe((double)({{ hist.value }}));
+            if (tl_last_ptr_{{ hist.name }} == nullptr || tl_last_hash_{{ hist.name }} != cur_hash) {
+                tl_last_ptr_{{ hist.name }} = &g_PromFamily_{{ hook.function_name }}_{{ hist.name }}->Add({ {"{{ hist.cpp_label.name }}", cur_val} }, g_PromBuckets_{{ hook.function_name }}_{{ hist.name }});
+                tl_last_hash_{{ hist.name }} = cur_hash;
             }
+            tl_last_ptr_{{ hist.name }}->Observe((double)({{ hist.value }}));
             {% endif %}
         }
         {% else %}

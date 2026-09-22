@@ -240,7 +240,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `strategy` | `string` | **Yes** | Resolution strategy: `"export"` (via `GetProcAddress`) or `"offset"` (via base address + RVA). |
-| `symbol_name` | `string` | No | Exported symbol name used by `GetProcAddress` (default: `function_name`). Allows hooking exported symbols with mangled/decorated C++ names (e.g., `"?Put@CLogQueue@@QEAAHPEAULOG_QENTRY@@@Z"`) or exported aliases differing from the DSL function name. |
+| `symbol_name` | `string` | No | Exported symbol name used by `GetProcAddress` (default: `function_name`). Allows hooking exported symbols with mangled/decorated C++ names or exported aliases differing from the DSL function name. |
 | `rva_offset` | `string` | **If `strategy: offset`** | Hexadecimal RVA offset (e.g., `"0x1A30"`). Integers are also accepted and auto-converted to hex. |
 
 #### `behaviors` Object
@@ -255,7 +255,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `execution_time` | `bool` | `false` | If `true`, measure target function execution latency using `QueryPerformanceCounter`, enabling the `latency` wildcard (in milliseconds) for use in metric values, conditions, and log format strings. |
+| `execution_time` | `bool` | `false` | If `true`, measure target function execution latency using `QueryPerformanceCounter`, enabling the `__hook_latency` wildcard (in milliseconds) for use in metric values, conditions, and log format strings. |
 | `counters` | `list[object]` | `[]` | List of Prometheus counter metric definitions. |
 | `gauges` | `list[object]` | `[]` | List of Prometheus gauge metric definitions. |
 | `histograms` | `list[object]` | `[]` | List of Prometheus histogram metric definitions. |
@@ -269,7 +269,7 @@ Each metric item defined inside `counters`, `gauges`, or `histograms` supports t
 | `name` | `string` | **Yes** | — | Unique metric name identifier within the hook. |
 | `description` | `string` | No | `""` | Help string / description for the Prometheus metric family. |
 | `condition` | `string` | No | `"true"` | Boolean C++ telemetry expression evaluated to determine if the metric is updated. |
-| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `latency`, `input_<param>`, `output_<param>`, `__hook_result`, or a valid c++ variable). |
+| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `__hook_latency`, `input_<param>`, `output_<param>`, `__hook_result`, or a valid c++ variable). |
 | `buckets` | `list[float]` | No (**Histograms**) | `[0.001, 0.005, ...]` | Upper bounds for histogram buckets. Default is `[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0]`. Must be a non-empty, strictly increasing list of positive numbers. |
 | `label` | `dict[string, string]` | No | `{}` | Key-value dictionary specifying dynamic Prometheus label mapping (e.g. `{ label_key: "expression" }`). At most 1 dynamic label per metric is allowed. |
 
@@ -291,7 +291,7 @@ performance_metrics:
   histograms:
     - name: "cs_enter_wait_time"
       description: "Distribution of critical section acquisition wait times"
-      value: "latency"
+      value: "__hook_latency"
       buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
 ```
 ###### Metrics Performance Guidelines
@@ -299,7 +299,7 @@ performance_metrics:
 When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-path hooked functions (e.g., `EnterCriticalSection`, `ReadFile`, `WaitForSingleObject`), adhere to the following practices:
 
 1. **Validation & Low-Cardinality Metric Labels**:
-   - Avoid using high-cardinality dynamic variables (such as thread IDs `{tid}`, pointer addresses `{input_buf_ptr}`, or timestamps) inside Prometheus metric label expressions.
+   - Avoid using high-cardinality dynamic variables (such as thread IDs `{__hook_tid}`, pointer addresses `{input_buf_ptr}`, or timestamps) inside Prometheus metric label expressions.
    - Prometheus documentation explicitly state: *“Labels should only be used for low-cardinality dimensions (e.g. HTTP status codes, error types, method names).”* High-cardinality values belong in **logs**, not metric labels.
 
 2. **Thread-Local / Direct Metric Caching**:
@@ -316,8 +316,8 @@ When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-
 | `name` | `string` | `"rule_N"` | Name identifier for the log rule (auto-generated as `rule_1`, `rule_2`, etc. if omitted). |
 | `condition` | `string` | `"true"` | Boolean C++ telemetry expression evaluated to determine if log fires. |
 | `level` | `string` | `"info"` | Log level (`trace`, `debug`, `info`, `warn`, `error`, `critical`). |
-| `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or `__hook_result` to capture for auto-generated format strings. |
-| `format` | `string` | `null` | Custom log format string supporting placeholders (`{tid}` (thread id), `{latency}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`, or any valid C++ `{variable/expression}`). |
+| `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or reserved hook variables (`__hook_result`, `__hook_latency`, `__hook_tid`) to capture for auto-generated format strings. |
+| `format` | `string` | `null` | Custom log format string supporting placeholders (`{__hook_tid}` (thread id), `{__hook_latency}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`, or any valid C++ `{variable/expression}`). |
 
 ###### Ways to Specify `log_rules`
 
@@ -342,7 +342,7 @@ When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-
    *Generated Log Message:* `"[HOOK FunctionName] [log_args] | input_lpSubKey={input_lpSubKey} | input_dwOptions={input_dwOptions}"`
 
 3. **Custom Format String with Placeholders**
-   Defines an explicit log message format using placeholders like `{tid}`, `{__hook_result}`, `{input_<param>}`, or `{output_<param>}` (with optional C++ format specifiers like `:x`):
+   Defines an explicit log message format using placeholders like `{__hook_tid}`, `{__hook_result}`, `{input_<param>}`, or `{output_<param>}` (with optional C++ format specifiers like `:x`):
    ```yaml
    log_rules:
      - name: "reg_open_failed"
@@ -385,10 +385,10 @@ The transpiler validates all `log_rules` in `process_log_rules` and will raise a
 - **Argument List Rules**:
   - `arguments` must be a list of strings.
   - Arguments within a single rule must be unique (no duplicate parameter names).
-  - Every argument name must start with `input_` or `output_` matching a valid function parameter (e.g. `input_lpSubKey`), or be `__hook_result`.
+  - Every argument name must start with `input_` or `output_` matching a valid function parameter (e.g. `input_lpSubKey`), or be a reserved hook variable (`__hook_result`, `__hook_latency`, `__hook_tid`).
 - **Format String Placeholders**: Placeholders inside `format` strings can reference:
-  - `{tid}` (Thread ID)
-  - `{latency}` (Execution time in milliseconds)
+  - `{__hook_tid}` (Thread ID)
+  - `{__hook_latency}` (Execution time in milliseconds)
   - `{__hook_result}` (Return value of the hooked function)
   - `{input_<param>}` or `{output_<param>}` (Target function parameters)
   - Custom C++ expressions, struct fields (e.g. `{input_pStruct->field}`), or local variables declared in `pre_hook` / `post_hook` callbacks.
@@ -460,7 +460,7 @@ hooks:
         histograms:
           - name: "queue_put_latency"
             description: "Distribution of QueuePut execution times"
-            value: "latency"
+            value: "__hook_latency"
             label:
               queue_id: "input_pQueue.queueId"
       log_rules:
@@ -527,21 +527,18 @@ The top-level template for the Frida-Gum engine. Utilizes Frida's dynamic binary
   1. Allocates a TLS index via `TlsAlloc()` for recursion guarding (same as Detours).
   2. Initializes telemetry globals, initializes embedded Frida-Gum (`gum_init_embedded()`), and obtains a `GumInterceptor` handle via `gum_interceptor_obtain()`.
   3. Resolves target function addresses.
-  4. Enumerates process worker threads via `EnlistAllThreads()` and explicitly suspends them with `SuspendThread()`.
-  5. Opens a Frida transaction via `gum_interceptor_begin_transaction(interceptor)`.
-  6. Replaces target functions based on return behavior:
+  4. Opens an atomic Frida transaction via `gum_interceptor_begin_transaction(interceptor)`.
+  5. Replaces target functions based on return behavior:
      - **Standard Functions** (`is_noreturn: false`): Calls `gum_interceptor_replace()`, enabling Frida's invocation listener stack tracking for thread ejection via `gum_interceptor_flush()`.
      - **Non-Returning Functions** (`is_noreturn: true`, e.g. `ExitProcess`, `ExitThread`, `RaiseException`): Calls `gum_interceptor_replace_fast()`. Standard `gum_interceptor_replace()` pushes an invocation frame on entry and expects to pop it on function exit; because non-returning functions never return, Frida's listener frame is never popped, which would cause `gum_interceptor_flush()` to hang indefinitely or fail. Using `gum_interceptor_replace_fast()` bypasses Frida's invocation listener stack, adopting a direct replacement model (similar to Detours) that relies on the `HookActiveThreads` RAII counter instead.
-  7. Commits the transaction via `gum_interceptor_end_transaction(interceptor)`, resumes all worker threads (`ResumeThread()`), and closes handles.
+  6. Commits the transaction via `gum_interceptor_end_transaction(interceptor)`, applying all trampoline modifications atomically.
 
 - **Detaching Procedure (`DeinitializeHooks()`)**:
   1. Stops background HTTP metric servers (`g_PromExposer.reset()`).
-  2. Enumerates and suspends all worker threads (`SuspendThread()`).
-  3. Opens a transaction (`gum_interceptor_begin_transaction()`), reverts all hook replacements via `gum_interceptor_revert()`, and commits the transaction (`gum_interceptor_end_transaction()`).
-  4. Resumes worker threads (`ResumeThread()`) and closes thread handles.
+  2. Opens a transaction (`gum_interceptor_begin_transaction()`), reverts all hook replacements via `gum_interceptor_revert()`, and commits the transaction (`gum_interceptor_end_transaction()`).
 
 - **Thread Safety & Ejection Synchronization**:
-  - **Attach/Detach Thread Safety**: Combines explicit worker thread suspension (`SuspendThread()`) with Frida's transaction block (`gum_interceptor_begin_transaction` / `end_transaction`).
+  - **Attach/Detach Thread Safety**: Uses Frida's native transaction block (`gum_interceptor_begin_transaction` / `end_transaction`) which applies atomic instruction patching across memory pages without manual `SuspendThread`, avoiding the Windows NT heap-lock deadlock hazard.
   - **Dual Ejection Synchronization**: Standard returning functions rely on `gum_interceptor_flush(interceptor)` to verify that zero active invocation frames remain on Frida's internal listener stack. Non-returning functions use the `HookActiveThreads` RAII counter (`activeThreads`) to track thread trapped within the hook logic . `DeinitializeHooks()` executes a 2-second spin-wait loop performing a dual check: `if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0)`. Once both checks confirm zero active threads, `g_object_unref(interceptor)` and `gum_deinit_embedded()` are called, followed by telemetry destruction (`spdlog::shutdown()`).
 
 #### `_hook_body.cpp` (Shared Partial)
@@ -582,7 +579,7 @@ Generates runtime telemetry evaluation logic inside each `Hooked<FunctionName>` 
 
 - Evaluates log rules against runtime conditions and emits logs via `spdlog` (or `fmt::format` / `OutputDebugStringA`, if `logger` is None).
 - Evaluates counter, gauge, and histogram metric conditions.
-- Handles dynamic metric labels using thread-local metric caching (`thread_local std::unordered_map` and pointer caching) for high-performance lock-free lookup on hot execution paths.
+- Handles dynamic metric labels using trivial thread-local POD caching (`uint64_t` hash and pointer caching) for high-performance lock-free lookup on hot execution paths without dynamic TLS destructor overhead.
 
 #### `_user_logic_helpers.cpp` (Shared Partial)
 
@@ -593,7 +590,6 @@ Provides utility functions and SEH-protected wrappers included at the top of eve
 - `HookActiveThreads` — RAII thread tracking counter (`activeThreads`) for safe ejection.
 - `CopyString` — safe string copy helper using SIMD `strnlen` to inspect `char*` pointers up to a max length without crash risks; memory access violations are caught by `/EHa` structured exception handling.
 - `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null or unmapped; protected against access violations via `/EHa`structured exception .
-- `EnlistAllThreads` — enumerates process threads (except the current one) that will be suspended during hook attach/detach for preventing crashes.
 
 #### `_dllmain.cpp` (Shared Partial)
 
@@ -641,9 +637,8 @@ Each element in `hook.parameters` is a dictionary describing a function paramete
 |-----|------|-------------|
 | `name` | `string` | Parameter variable identifier in the C++ function signature |
 | `type` | `string` | Original C++ type declaration (e.g., `LPCSTR`, `int*`) |
-| `pointer_depth` | `int` | Level of pointer indirection |
 | `is_char_ptr` | `bool` | `true` if parameter is a C-string pointer (`char*`, `LPCSTR`, `wchar_t*`, etc.) |
-| `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)` or raw parameter) |
+| `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)`, `CopyString(...)`, or raw parameter) |
 | `safe_type` | `string` | Appropriate C++ type for storing/logging the value (e.g., `std::string` for string pointers) |
 
 ---
@@ -686,6 +681,22 @@ inline_hook:
 | `libs_arg` | Yes | Name of the CLI argument providing the engine's static library path (maps to `argparse` attribute) |
 | `inc_arg` | Yes | Name of the CLI argument providing the engine's include directory (maps to `argparse` attribute) |
 | `extra_libs` | No (default `[]`) | Additional Windows `.lib` files or paths to link |
+
+### Engine Selection Guidelines: Detours vs. Frida-Gum for Low-Level APIs
+
+When instrumenting complex multithreaded Windows processes, selecting the appropriate engine is critical when intercepting frequently invoked, low-level Win32 synchronization primitives (`EnterCriticalSection`, `LeaveCriticalSection`, `WaitForSingleObject`, `ReleaseMutex`).
+
+#### 1. The Instruction Pointer (`RIP`) Relocation Hazard in Live Processes
+When inline hooks overwrite the prologue of high-frequency APIs in an actively running process:
+- **Microsoft Detours (`detours_template.cpp`)**: Uses `EnlistAllThreads()` combined with `DetourUpdateThread()`. During `DetourTransactionCommit()`, Detours suspends active worker threads and calls `GetThreadContext()` to inspect each thread's instruction pointer (`RIP`). If a worker thread is paused mid-execution inside the first 5+ bytes of the prologue being overwritten, Detours **recalculates the instruction offset and updates `RIP` (`SetThreadContext`)** to point to the relocated instruction within the trampoline stub before resuming the thread.
+- **Frida-Gum (`frida_template.cpp`)**: Applies atomic in-memory instruction patching within `gum_interceptor_begin_transaction` / `end_transaction`, but does **not** inspect or adjust the `RIP` registers of existing worker threads. If a background thread is currently executing the first few bytes of `EnterCriticalSection` during live patching, its `RIP` lands on a partial jump instruction. This mangles CPU registers (e.g., leaving `RBX` pointing to deallocated `MEM_FREE` memory), triggering an immediate `c0000005 ACCESS_VIOLATION`.
+
+#### 2. The Memory Allocation Deadlock Hazard
+Frida-Gum cannot safely solve this by blindly calling `SuspendThread()` across all worker threads:
+- Frida-Gum's runtime is built on GLib (`g_malloc`, `g_slice`, etc.) and **dynamically allocates heap memory** during `gum_interceptor_replace()` and `gum_interceptor_end_transaction()`.
+- If a worker thread is suspended while holding the NT Process Heap lock (`RtlAllocateHeap`), the injector thread will permanently deadlock when Frida tries to allocate memory.
+- Microsoft Detours' core transaction engine was hand-crafted to avoid standard heap allocations during `DetourTransactionCommit()`, allowing safe thread suspension and `RIP` relocation without colliding with process heap locks.
+
 
 ---
 

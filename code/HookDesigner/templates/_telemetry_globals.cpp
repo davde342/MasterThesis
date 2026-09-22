@@ -61,6 +61,7 @@ static prometheus::Gauge* g_PromMetric_{{ hook.function_name }}_{{ gauge.name }}
 {% endif %}
   {% endfor %}
   {% for hist in hook.behaviors.performance_metrics.histograms %}
+static const std::vector<double> g_PromBuckets_{{ hook.function_name }}_{{ hist.name }} = { {%- for b in hist.buckets -%}{{ b }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%} };
 static prometheus::Family<prometheus::Histogram>* g_PromFamily_{{ hook.function_name }}_{{ hist.name }} = nullptr;
 {% if not hist.cpp_label %}
 static prometheus::Histogram* g_PromMetric_{{ hook.function_name }}_{{ hist.name }} = nullptr;

@@ -1,7 +1,6 @@
 #include "frida-gum.h"
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
-#include <tlhelp32.h>
 #include <iostream>
 #include "spdlog/fmt/fmt.h"
 #include <mutex>
@@ -80,11 +79,6 @@ extern "C" __declspec(dllexport) void InitializeHooks() {
     {% endfor %}
 
 
-    std::vector<HANDLE> threads = EnlistAllThreads();
-    for (HANDLE hThread : threads) {
-        SuspendThread(hThread);
-    }
-
     gum_interceptor_begin_transaction(interceptor);
 
     {% for hook in hooks %}
@@ -111,15 +105,9 @@ extern "C" __declspec(dllexport) void InitializeHooks() {
 
     gum_interceptor_end_transaction(interceptor);
 
-    for (HANDLE hThread : threads) {
-        ResumeThread(hThread);
-        CloseHandle(hThread);
-    }
-
     g_HooksAttached = true;
     g_Ejected = false;
-    std::string msg = fmt::format("[HOOK] Frida-Gum hooks successfully attached. Suspended/resumed {} worker threads.\n", threads.size());
-    OutputDebugStringA(msg.c_str());
+    OutputDebugStringA("[HOOK] Frida-Gum hooks successfully attached.\n");
 }
 
 
@@ -133,11 +121,6 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
         g_PromExposer.reset();
         {% endif %}
 
-        std::vector<HANDLE> threads = EnlistAllThreads();
-        for (HANDLE hThread : threads) {
-            SuspendThread(hThread);
-        }
-
         // 2. Revert hooks so no new API calls enter telemetry logic
         gum_interceptor_begin_transaction(interceptor);
         {% for hook in hooks %}
@@ -147,11 +130,6 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
         {% endfor %}
         gum_interceptor_end_transaction(interceptor);
 
-        for (HANDLE hThread : threads) {
-            ResumeThread(hThread);
-            CloseHandle(hThread);
-        }
-
         g_HooksAttached = false; // Hooks are now detached/reverted
     }
 
@@ -160,12 +138,18 @@ extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
     while (GetTickCount() - start < 2000) {
         {% if has_noreturn %}
         if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0) {
+            Sleep(1000);
+            if (activeThreads.load() == 0) {
+                g_Ejected = true;
+                break;
+            }
+        }
         {% else %}
         if (gum_interceptor_flush(interceptor)) {
-        {% endif %}
             g_Ejected = true;
             break;
         }
+        {% endif %}
         Sleep(50);
     }
 
