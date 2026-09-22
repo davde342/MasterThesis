@@ -1,0 +1,172 @@
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath}
+
+% we use biblatex, which is a more modern alternative to the traditional bibtex
+% comment this to use bibtex instead
+\usepackage[
+    backend=biber,
+    style=alphabetic,
+    sorting=nyt,
+    maxbibnames=99
+]{biblatex}
+
+% graphicx is needed to include images
+\usepackage{graphicx}
+
+% float is needed for [H] strict placement
+\usepackage{float}
+
+% xspace is used to add a space after a macro, if needed
+\usepackage{xspace}
+
+% acronym (https://ctan.org/pkg/acronym) is a package to expand acronyms after their first usage
+\usepackage{acronym}
+
+% the hyperref package provides links; with this configuration they are colored
+% according to the scheme described in https://tex.stackexchange.com/a/525297
+\usepackage{xcolor}
+\usepackage[colorlinks]{hyperref}
+\def\tmp#1#2#3{%
+  \definecolor{Hy#1color}{#2}{#3}%
+  \hypersetup{#1color=Hy#1color}}
+\tmp{link}{HTML}{800006}
+\tmp{cite}{HTML}{2E7E2A}
+\tmp{file}{HTML}{131877}
+\tmp{url} {HTML}{8A0087}
+\tmp{menu}{HTML}{727500}
+\tmp{run} {HTML}{137776}
+\def\tmp#1#2{%
+  \colorlet{Hy#1bordercolor}{Hy#1color#2}%
+  \hypersetup{#1bordercolor=Hy#1bordercolor}}
+\tmp{link}{!60!white}
+\tmp{cite}{!60!white}
+\tmp{file}{!60!white}
+\tmp{url} {!60!white}
+\tmp{menu}{!60!white}
+\tmp{run} {!60!white}
+
+% additional colors for diagrams and listings
+\definecolor{amber}{RGB}{255, 191, 0}
+% the booktabs package is used to create better tables; check an example of usage in results.tex
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{ragged2e}
+
+%breaks long URLs better
+\usepackage{xurl}
+
+% macros
+\newcommand*{\latex}{\LaTeX \xspace}
+% Enable hyphenation and line breaking for typewriter font (\texttt / \ttfamily)
+\makeatletter
+\g@addto@macro\ttfamily{\hyphenchar\font=45\relax}
+\makeatother
+\renewcommand{\_}{\textunderscore\allowbreak}
+\setlength{\emergencystretch}{2em}
+
+\usepackage{hyperref}
+\newcommand{\myhref}[2]{#2\footnote{\url{#1}}}
+
+% graphics and diagrams
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta, shapes.geometric, positioning}
+
+% tracking changes using the todonotes package
+\setlength {\marginparwidth }{2cm}
+\usepackage{todonotes}
+\newcommand{\note}[3]{\todo[inline,color=#2]{#1: #3}}
+\newcommand{\md}[1]{\note{MD}{yellow}{#1}}
+
+% result is something like "Related Work (Chapter 2)"
+\newcommand{\fullref}[1]{\nameref{#1} (\Cref{#1})}
+
+% used for the inparaenum environment
+\usepackage{paralist}
+
+% for code
+\usepackage{listings}
+\definecolor{listinggray}{gray}{0.9}
+\definecolor{lbcolor}{rgb}{0.9,0.9,0.9}
+\lstloadlanguages{C++,C,Java,Python,Bash,[x86masm]Assembler}
+
+\lstdefinelanguage{CSharp}[Sharp]{C}{morekeywords={yield}}
+
+\lstdefinelanguage{x86}[x86masm]{Assembler}{morekeywords={syscall,sysenter,section,global,bits,rel}}
+
+\lstdefinelanguage{arm}{
+  basicstyle=\ttfamily\small,
+  alsoletter=-,
+  keywords={MOV, ADD, SUB, SUBS, BNE, B, BL, LDR, SUBGT, SUBLT, CMP, MOVEQ, BLEQ, AND, ORR, EOR, BIC, MOVGT, CMPNE, MVN, CMN, TST, TEQ, ADC, SBC, RSB, RSC, LDMIA, STMIA, ADDLS, END, MOVS, SUBNES, MULNE, UMULL, UMLAL, SMULL, SMLAL, STMFD, LDMFD, PUSH, POP, STMDB, ANDS, BEQ, STR, LDRLS, SWI, SVC, BX, BGT, SUBLE, STRB, ASR, LSL, LSR, ROR, RRX, ORN, LDM, STM, ADDLE, SUBSNE, MOV32, MOVT},
+  keywordstyle=\color{red}\bfseries,
+  ndkeywords={.data, .text},
+  ndkeywordstyle=\color{blue}\bfseries,
+  identifierstyle=\color{black},
+  sensitive=false,
+  comment=[l]{@},
+  commentstyle=\color[rgb]{0.133,0.545,0.133},
+  stringstyle=\color[rgb]{0.627,0.126,0.941},
+  morestring=[b]',
+  morestring=[b]",
+  frame=0
+}
+
+\lstdefinelanguage{JavaScript}{
+  keywords={break, case, catch, continue, debugger, default, delete, do, else, false, finally, for, function, if, in, instanceof, new, null, return, switch, this, throw, true, try, typeof, var, void, while, with},
+  morecomment=[l]{//},
+  morecomment=[s]{/*}{*/},
+  morestring=[b]',
+  morestring=[b]",
+  ndkeywords={class, export, boolean, throw, implements, import, this},
+  keywordstyle=\color{blue}\bfseries,
+  ndkeywordstyle=\color{darkgray}\bfseries,
+  identifierstyle=\color{black},
+  commentstyle=\color{purple}\ttfamily,
+  stringstyle=\color{red}\ttfamily,
+  sensitive=true
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  language=C++,
+  %backgroundcolor=\color{lbcolor},
+  frame=single,
+  commentstyle=\color[rgb]{0.133,0.545,0.133},
+  keywordstyle=\color[rgb]{0,0,1},
+  stringstyle=\color[rgb]{0.627,0.126,0.941},
+  showtabs=false,
+  showspaces=false,
+  showstringspaces=false,
+  columns=fullflexible,
+  mathescape=true,
+  keepspaces,
+  breaklines=true,
+  breakatwhitespace=false,
+  upquote=true,
+  tabsize=2,
+  moredelim=[is][\color{red}]{`}{`},%
+  moredelim=[is][\color{red}]{~red~}{~red~},%
+  moredelim=[is][\color{green}]{~green~}{~green~},%
+  moredelim=[is][\color{cyan}]{~cyan~}{~cyan~},%
+  moredelim=[is][\color{gray}]{~gray~}{~gray~},%
+  moredelim=[is][\color{blue}]{~blue~}{~blue~},%
+  moredelim=[is][\color{blue}\bfseries]{/*blue*/}{/*blue*/},
+  moredelim=[is][\color{red}\bfseries]{/*red*/}{/*red*/},
+  moredelim=[is][\color{cyan}\bfseries]{/*cyan*/}{/*cyan*/},
+  moredelim=[is][\bfseries]{/*bf*/}{/*bf*/},
+  moredelim=[is][]{/***}{***/}
+}
+
+
+\usepackage{subcaption}
+
+\usepackage[noabbrev,capitalise]{cleveref}
+\AtBeginDocument{%
+  \crefname{lstlisting}{code}{codes}%
+  \Crefname{lstlisting}{Code}{Codes}%
+  \crefname{listing}{code}{codes}%
+  \Crefname{listing}{Code}{Codes}%
+  \renewcommand{\lstlistingname}{Code}%
+}
+
+\renewcommand{\arraystretch}{1.2}
