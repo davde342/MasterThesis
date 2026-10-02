@@ -239,12 +239,27 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "Injection successful. Calling InitializeHooks\n";
+        std::cout << "Injection successful. Calling InitializeHooks remotely...\n";
         HMODULE hRemoteModule = GetAndValidateDllBase(pi.dwProcessId, dllPath);
-        if (!hRemoteModule || !CallRemoteExport(pi.hProcess, hRemoteModule, dllPath, "InitializeHooks")) {
-            std::cerr << "Failed to call InitializeHooks\n";
+        DWORD initExitCode = (DWORD)-1;
+        if (!hRemoteModule || !CallRemoteExport(pi.hProcess, hRemoteModule, dllPath, "InitializeHooks", &initExitCode)) {
+            std::cerr << "Error: Failed to execute remote thread for InitializeHooks.\n";
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return 1;
         }
 
+        if (initExitCode != 0) {
+            std::cerr << "Error: InitializeHooks failed in target process with code: 0x" 
+                      << std::hex << initExitCode << "\n";
+            TerminateProcess(pi.hProcess, 1);
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+            return 1;
+        }
+
+        std::cout << "Hooks successfully initialized. Resuming main thread...\n";
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
 
@@ -273,11 +288,32 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "Injection successful. Calling InitializeHooks\n";
+        std::cout << "Injection successful. Calling InitializeHooks remotely...\n";
         HMODULE hRemoteModule = GetAndValidateDllBase(pid, dllPath);
-        if (!hRemoteModule || !CallRemoteExport(hProcess, hRemoteModule, dllPath, "InitializeHooks")) {
-            std::cerr << "Failed to call InitializeHooks remotely.\n";
+        DWORD initExitCode = (DWORD)-1;
+        if (!hRemoteModule || !CallRemoteExport(hProcess, hRemoteModule, dllPath, "InitializeHooks", &initExitCode)) {
+            std::cerr << "Error: Failed to execute remote thread for InitializeHooks.\n";
+            CloseHandle(hProcess);
+            return 1;
         }
+
+        if (initExitCode != 0) {
+            std::cerr << "Error: InitializeHooks failed in target process with code: 0x" 
+                      << std::hex << initExitCode << "\n";
+            std::cout << "Rolling back injection: unloading DLL from target process...\n";
+            HMODULE hKernel32 = GetModuleHandleA("Kernel32.dll");
+            LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
+            HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
+            if (hThread) {
+                WaitForSingleObject(hThread, 5000);
+                CloseHandle(hThread);
+                std::cout << "DLL successfully unloaded.\n";
+            }
+            CloseHandle(hProcess);
+            return 1;
+        }
+
+        std::cout << "Hooks successfully initialized in target process.\n";
     } else if (mode == "eject") {
         HMODULE hRemoteModule = GetAndValidateDllBase(pid, dllPath);
         if (!hRemoteModule) {
@@ -289,14 +325,17 @@ int main(int argc, char* argv[]) {
         LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
 
         std::cout << "Calling DeinitializeHooks remotely...\n";
-        DWORD deinitExitCode = 1; // Default to success/TRUE
+        DWORD deinitExitCode = (DWORD)-1;
         if (!CallRemoteExport(hProcess, hRemoteModule, dllPath, "DeinitializeHooks", &deinitExitCode)) {
             std::cerr << "Warning: Failed to call DeinitializeHooks remotely.\n";
         }
 
-        if (deinitExitCode == 0) { // FALSE
+        if (deinitExitCode == 1) {
             std::cout << "[WARNING] Hooks successfully detached, but some threads remain blocked inside them, frequent when blocking functions are hooked.\n";
             std::cout << "[WARNING] Skipping FreeLibrary (leaking DLL in target memory) to prevent target crash. Ejection completed.\n";
+        } else if (deinitExitCode != 0) {
+            std::cerr << "[ERROR] DeinitializeHooks reported error code: 0x" 
+                      << std::hex << deinitExitCode << ". Skipping FreeLibrary.\n";
         } else {
             std::cout << "Ejecting DLL...\n";
             HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);

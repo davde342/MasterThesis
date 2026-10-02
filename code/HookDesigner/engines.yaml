@@ -2,8 +2,8 @@ inline_hook:
   detours:
     template: "detours_template.cpp"
     cast_format: "(True{name}_t)"
-    libs_arg: "detours_lib"
-    inc_arg: "detours_include"
+    include_path: "${DETOURS_INC}"
+    lib_path: "${DETOURS_LIB_{ARCH}}"
     extra_libs:
       - "User32.lib"
       - "Advapi32.lib"
@@ -11,11 +11,12 @@ inline_hook:
   frida:
     template: "frida_template.cpp"
     cast_format: "(gpointer)"
-    libs_arg: "frida_lib"
-    inc_arg: "frida_include"
+    include_path: "${FRIDA_INC_{ARCH}}"
+    lib_path: "${FRIDA_LIB_{ARCH}}"
     extra_libs:
       - "User32.lib"
       - "Advapi32.lib"
       - "Ole32.lib"
       - "Shell32.lib"
+
 

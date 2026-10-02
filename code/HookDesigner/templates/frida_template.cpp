@@ -3,6 +3,11 @@
 #include <windows.h>
 #include <iostream>
 #include "spdlog/fmt/fmt.h"
+#if defined(SPDLOG_FMT_EXTERNAL)
+#include <fmt/compile.h>
+#else
+#include "spdlog/fmt/bundled/compile.h"
+#endif
 #include <mutex>
 #include <atomic>
 #include <vector>
@@ -13,6 +18,11 @@
 {% if telemetry %}
 {% include "_telemetry_globals.cpp" %}
 {% endif %}
+
+#if defined(_M_IX86)
+#pragma comment(linker, "/EXPORT:InitializeHooks=_InitializeHooks@4")
+#pragma comment(linker, "/EXPORT:DeinitializeHooks=_DeinitializeHooks@4")
+#endif
 
 // Global synchronizations
 static bool g_HooksAttached = false;
@@ -51,131 +61,214 @@ static gpointer target_{{ hook.function_name }} = nullptr;
 
 
 // Attach / Detach Transactions
-extern "C" __declspec(dllexport) void InitializeHooks() {
-    g_TlsIndex = TlsAlloc();
-    {% if telemetry %}
-    {% include "_telemetry_init.cpp" %}
-    {% endif %}
-    gum_init_embedded();
-    interceptor = gum_interceptor_obtain();
+extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
+    bool in_transaction = false;
 
-    {% for hook in hooks %}
-    {% if hook.module %}
-    {
-        HMODULE hMod = GetModuleHandleA("{{ hook.module }}");
-        if (hMod) {
-            target_{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
-        } else {
-            target_{{ hook.function_name }} = nullptr;
+    try {
+        g_TlsIndex = TlsAlloc();
+        if (g_TlsIndex == TLS_OUT_OF_INDEXES) {
+            OutputDebugStringA("[CRITICAL] TlsAlloc failed\n");
+            return 0xE0000001;
         }
-    }
-    {% else %}
-    target_{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
-    {% endif %}
-    if (!target_{{ hook.function_name }}) {
-        std::string msg = fmt::format("[WARNING] Failed to resolve target function: '{}' (check if module is loaded or function is exported)\n", "{{ hook.function_name }}");
-        OutputDebugStringA(msg.c_str());
-    }
-    {% endfor %}
 
-
-    gum_interceptor_begin_transaction(interceptor);
-
-    {% for hook in hooks %}
-    if (target_{{ hook.function_name }}) {
-        {% if hook.is_noreturn %}
-        GumReplaceReturn r = gum_interceptor_replace_fast(interceptor,
-                                target_{{ hook.function_name }},
-                                (gpointer)Hooked{{ hook.function_name }},
-                                (gpointer*)&True{{ hook.function_name }});
-        {% else %}
-        GumReplaceReturn r = gum_interceptor_replace(interceptor,
-                                target_{{ hook.function_name }},
-                                (gpointer)Hooked{{ hook.function_name }},
-                                nullptr,
-                                (gpointer*)&True{{ hook.function_name }});
+        {% if telemetry %}
+        {% include "_telemetry_init.cpp" %}
         {% endif %}
-        if (r != GUM_REPLACE_OK) {
-            std::string msg = fmt::format("[CRITICAL] Frida failed to replace function '{}'. Error code: {}\n", "{{ hook.function_name }}", (int)r);
-            OutputDebugStringA(msg.c_str());
-        }
-    }
-    {% endfor %}
+        gum_init_embedded();
+        interceptor = gum_interceptor_obtain();
 
-
-    gum_interceptor_end_transaction(interceptor);
-
-    g_HooksAttached = true;
-    g_Ejected = false;
-    OutputDebugStringA("[HOOK] Frida-Gum hooks successfully attached.\n");
-}
-
-
-
-extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
-    if (g_Ejected) return TRUE;
-
-    if (g_HooksAttached) {
-        // 1. Stop background HTTP server thread first so Civetweb worker thread exits select()
-        {% if telemetry and telemetry.metrics == "prometheus" %}
-        g_PromExposer.reset();
-        {% endif %}
-
-        // 2. Revert hooks so no new API calls enter telemetry logic
-        gum_interceptor_begin_transaction(interceptor);
         {% for hook in hooks %}
-        if (target_{{ hook.function_name }} != nullptr) {
-            gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
-        }
-        {% endfor %}
-        gum_interceptor_end_transaction(interceptor);
-
-        g_HooksAttached = false; // Hooks are now detached/reverted
-    }
-
-    // 3. Spin-wait flush loop until all in-flight application threads exit hook code
-    DWORD start = GetTickCount();
-    while (GetTickCount() - start < 2000) {
-        {% if has_noreturn %}
-        if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0) {
-            Sleep(1000);
-            if (activeThreads.load() == 0) {
-                g_Ejected = true;
-                break;
+        {% if hook.module %}
+        {
+            HMODULE hMod = GetModuleHandleA("{{ hook.module }}");
+            if (hMod) {
+                target_{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
+            } else {
+                target_{{ hook.function_name }} = nullptr;
             }
         }
         {% else %}
-        if (gum_interceptor_flush(interceptor)) {
-            g_Ejected = true;
-            break;
-        }
+        target_{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
         {% endif %}
-        Sleep(50);
-    }
+        if (!target_{{ hook.function_name }}) {
+            std::string msg = fmt::format("[WARNING] Failed to resolve target function: '{}' (check if module is loaded or function is exported)\n", "{{ hook.function_name }}");
+            OutputDebugStringA(msg.c_str());
+        }
+        {% endfor %}
 
-    if (g_Ejected) {
-        // 4. Destroy metrics & loggers AFTER flush confirms zero threads are inside hook bodies
+        gum_interceptor_begin_transaction(interceptor);
+        in_transaction = true;
+
+        {% for hook in hooks %}
+        if (target_{{ hook.function_name }}) {
+            {% if hook.is_noreturn %}
+            GumReplaceReturn r = gum_interceptor_replace_fast(interceptor,
+                                    target_{{ hook.function_name }},
+                                    (gpointer)Hooked{{ hook.function_name }},
+                                    (gpointer*)&True{{ hook.function_name }});
+            {% else %}
+            GumReplaceReturn r = gum_interceptor_replace(interceptor,
+                                    target_{{ hook.function_name }},
+                                    (gpointer)Hooked{{ hook.function_name }},
+                                    nullptr,
+                                    (gpointer*)&True{{ hook.function_name }});
+            {% endif %}
+            if (r != GUM_REPLACE_OK) {
+                std::string msg = fmt::format("[CRITICAL] Frida failed to replace function '{}'. Error code: {}\n", "{{ hook.function_name }}", (int)r);
+                OutputDebugStringA(msg.c_str());
+            }
+        }
+        {% endfor %}
+
+        gum_interceptor_end_transaction(interceptor);
+        in_transaction = false;
+
+        g_HooksAttached = true;
+        g_Ejected = false;
+        OutputDebugStringA("[HOOK] Frida-Gum hooks successfully attached.\n");
+        return 0; // Success
+    }
+    catch (const std::exception& ex) {
+        if (in_transaction && interceptor) {
+            gum_interceptor_end_transaction(interceptor);
+        }
+        if (interceptor) {
+            g_object_unref(interceptor);
+            interceptor = nullptr;
+            gum_deinit_embedded();
+        }
         {% if telemetry and telemetry.metrics == "prometheus" %}
+        g_PromExposer.reset();
         g_PromRegistry.reset();
         {% endif %}
         {% if telemetry and telemetry.logger == "spdlog" %}
         spdlog::shutdown();
         {% endif %}
-
-        g_object_unref(interceptor);
-        gum_deinit_embedded();
-
         if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
             TlsFree(g_TlsIndex);
             g_TlsIndex = TLS_OUT_OF_INDEXES;
         }
-
-        OutputDebugStringA("[HOOK] Frida-Gum hooks successfully detached and all active threads ejected.\n");
-    } else {
-        OutputDebugStringA("[WARNING] Frida-Gum hooks successfully detached, but some threads remain blocked inside them. Leaking DLL.\n");
+        std::string msg = fmt::format("[CRITICAL] Exception in InitializeHooks: {}\n", ex.what());
+        OutputDebugStringA(msg.c_str());
+        return 0xE0000002;
     }
+    catch (...) {
+        if (in_transaction && interceptor) {
+            gum_interceptor_end_transaction(interceptor);
+        }
+        if (interceptor) {
+            g_object_unref(interceptor);
+            interceptor = nullptr;
+            gum_deinit_embedded();
+        }
+        {% if telemetry and telemetry.metrics == "prometheus" %}
+        g_PromExposer.reset();
+        g_PromRegistry.reset();
+        {% endif %}
+        {% if telemetry and telemetry.logger == "spdlog" %}
+        spdlog::shutdown();
+        {% endif %}
+        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
+            TlsFree(g_TlsIndex);
+            g_TlsIndex = TLS_OUT_OF_INDEXES;
+        }
+        OutputDebugStringA("[CRITICAL] SEH/Hardware fault in InitializeHooks\n");
+        return 0xE0000003;
+    }
+}
 
-    return g_Ejected;
+
+
+extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) {
+    bool in_transaction = false;
+
+    try {
+        if (g_Ejected || !interceptor) return 0;
+
+        if (g_HooksAttached) {
+            // 1. Stop background HTTP server thread first so Civetweb worker thread exits select()
+            {% if telemetry and telemetry.metrics == "prometheus" %}
+            g_PromExposer.reset();
+            {% endif %}
+
+            // 2. Revert hooks so no new API calls enter telemetry logic
+            gum_interceptor_begin_transaction(interceptor);
+            in_transaction = true;
+
+            {% for hook in hooks %}
+            if (target_{{ hook.function_name }} != nullptr) {
+                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+            }
+            {% endfor %}
+
+            gum_interceptor_end_transaction(interceptor);
+            in_transaction = false;
+
+            g_HooksAttached = false; // Hooks are now detached/reverted
+        }
+
+        // 3. Spin-wait flush loop until all in-flight application threads exit hook code
+        DWORD start = GetTickCount();
+        while (GetTickCount() - start < 2000) {
+            {% if has_noreturn %}
+            if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0) {
+                Sleep(1000);
+                if (activeThreads.load() == 0) {
+                    g_Ejected = true;
+                    break;
+                }
+            }
+            {% else %}
+            if (gum_interceptor_flush(interceptor)) {
+                g_Ejected = true;
+                break;
+            }
+            {% endif %}
+            Sleep(50);
+        }
+
+        if (g_Ejected) {
+            // 4. Destroy metrics & loggers AFTER flush confirms zero threads are inside hook bodies
+            {% if telemetry and telemetry.metrics == "prometheus" %}
+            g_PromRegistry.reset();
+            {% endif %}
+            {% if telemetry and telemetry.logger == "spdlog" %}
+            spdlog::shutdown();
+            {% endif %}
+
+            if (interceptor) {
+                g_object_unref(interceptor);
+                interceptor = nullptr;
+                gum_deinit_embedded();
+            }
+
+            if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
+                TlsFree(g_TlsIndex);
+                g_TlsIndex = TLS_OUT_OF_INDEXES;
+            }
+
+            OutputDebugStringA("[HOOK] Frida-Gum hooks successfully detached and all active threads ejected.\n");
+            return 0; // Success
+        } else {
+            OutputDebugStringA("[WARNING] Frida-Gum hooks successfully detached, but some threads remain blocked inside them. Leaking DLL.\n");
+            return 1; // Leaked DLL warning
+        }
+    }
+    catch (const std::exception& ex) {
+        if (in_transaction && interceptor) {
+            gum_interceptor_end_transaction(interceptor);
+        }
+        std::string msg = fmt::format("[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what());
+        OutputDebugStringA(msg.c_str());
+        return 0xE0000002;
+    }
+    catch (...) {
+        if (in_transaction && interceptor) {
+            gum_interceptor_end_transaction(interceptor);
+        }
+        OutputDebugStringA("[CRITICAL] SEH/Hardware fault in DeinitializeHooks\n");
+        return 0xE0000003;
+    }
 }
 
 {% include "_dllmain.cpp" %}

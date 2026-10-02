@@ -14,6 +14,7 @@ static LARGE_INTEGER g_PerfFrequency = {0};
 
 {% if telemetry.metrics == "prometheus" %}
 #include "prometheus/exposer.h"
+#include "CivetServer.h"
 #include "prometheus/registry.h"
 #include "prometheus/counter.h"
 #include "prometheus/gauge.h"

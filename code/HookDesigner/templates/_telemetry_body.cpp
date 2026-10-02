@@ -1,25 +1,15 @@
         // --- Logging ---
-        {% if hook.behaviors.log_rules %}
+        {% if telemetry.logger == "spdlog" and hook.behaviors.log_rules %}
         {% for rule in hook.behaviors.log_rules %}
         {% if rule.condition != "true" %}
         if ({{ rule.condition }}) {
-            {% if telemetry.logger == "spdlog" %}
-            spdlog::{{ rule.level }}("{{ rule.cpp_log_format_str }}"{% for expr in rule.cpp_log_exprs %}, {{ expr }}{% endfor %});
-            {% else %}
+        {% else %}
+        {
+        {% endif %}
             fmt::memory_buffer ss_{{ rule.name }};
-            fmt::format_to(std::back_inserter(ss_{{ rule.name }}), "{{ rule.cpp_log_format_str }}\n"{% for expr in rule.cpp_log_exprs %}, {{ expr }}{% endfor %});
-            OutputDebugStringA(fmt::to_string(ss_{{ rule.name }}).c_str());
-            {% endif %}
+            fmt::format_to(std::back_inserter(ss_{{ rule.name }}), FMT_COMPILE("{{ rule.cpp_log_format_str }}"){% for expr in rule.cpp_log_exprs %}, {{ expr }}{% endfor %});
+            spdlog::{{ rule.level }}(spdlog::string_view_t(ss_{{ rule.name }}.data(), ss_{{ rule.name }}.size()));
         }
-        {% else %}
-        {% if telemetry.logger == "spdlog" %}
-        spdlog::{{ rule.level }}("{{ rule.cpp_log_format_str }}"{% for expr in rule.cpp_log_exprs %}, {{ expr }}{% endfor %});
-        {% else %}
-        fmt::memory_buffer ss_{{ rule.name }};
-        fmt::format_to(std::back_inserter(ss_{{ rule.name }}), "{{ rule.cpp_log_format_str }}\n"{% for expr in rule.cpp_log_exprs %}, {{ expr }}{% endfor %});
-        OutputDebugStringA(fmt::to_string(ss_{{ rule.name }}).c_str());
-        {% endif %}
-        {% endif %}
         {% endfor %}
         {% endif %}
 

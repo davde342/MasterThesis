@@ -15,14 +15,8 @@ except ImportError:
     pass
 
 # paths matching the local environment, overridable via environment variables or env file
-DEFAULT_VCVARS_PATH = os.environ.get("VCVARS64_PATH", "")
-DEFAULT_DETOURS_INC = os.environ.get("DETOURS_INC", "")
-DEFAULT_DETOURS_LIB = os.environ.get("DETOURS_LIB", "")
-DEFAULT_FRIDA_INC = os.environ.get("FRIDA_INC", "")
-DEFAULT_FRIDA_LIB = os.environ.get("FRIDA_LIB", "")
 DEFAULT_SPDLOG_INC = os.environ.get("SPDLOG_INC", "")
 DEFAULT_PROMETHEUS_INC = os.environ.get("PROMETHEUS_INC", "")
-DEFAULT_PROMETHEUS_LIBS = os.environ.get("PROMETHEUS_LIBS", "")
 DEFAULT_LIBCLANG_PATH = os.environ.get("LIBCLANG_PATH", "")
 DEFAULT_ENGINES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "engines.yaml")
 
@@ -46,8 +40,8 @@ METRIC_CONFIGS = {
 
 # required fields per paradigm
 PARADIGM_SCHEMAS = {
-    "inline_hook": ["template", "cast_format", "libs_arg", "inc_arg"],
-    "default":     ["template", "libs_arg", "inc_arg"]
+    "inline_hook": ["template", "cast_format", "lib_path", "include_path"],
+    "default":     ["template", "lib_path", "include_path"]
 }
 
 # C++ Preamble for clang to understand Windows macros
@@ -61,8 +55,6 @@ CPP_PREAMBLE = """
 """
 
 
-
-ENGINES = {}
 
 def load_engines(config_path=DEFAULT_ENGINES_CONFIG):
     if not os.path.exists(config_path):
@@ -107,6 +99,8 @@ def load_engines(config_path=DEFAULT_ENGINES_CONFIG):
         raise ValueError(f"Engine registry configuration file '{config_path}' defined no paradigms/engines.")
         
     return loaded_engines
+
+ENGINES = load_engines(DEFAULT_ENGINES_CONFIG)
 
 def get_engine_config(engine_name, paradigm=None):
     engine_lower = engine_name.lower()
@@ -852,15 +846,28 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
     engine_cfg = get_engine_config(engine)
     if not engine_cfg:
         raise ValueError(f"Engine config not found for '{engine}' during compilation")
-    inc_path = getattr(args, engine_cfg["inc_arg"])
-    lib_path = getattr(args, engine_cfg["libs_arg"])
-    vcvars_path = args.vcvars
+    
+    arch_tag = args.arch.upper()
 
-    validate_safe_path(inc_path, f"Engine '{engine}' include directory ({engine_cfg['inc_arg']})", is_dir=True, must_exist=True)
-    validate_safe_path(lib_path, f"Engine '{engine}' library file ({engine_cfg['libs_arg']})", is_dir=False, must_exist=True)
+    raw_inc = engine_cfg["include_path"].replace("{ARCH}", arch_tag)
+    raw_lib = engine_cfg["lib_path"].replace("{ARCH}", arch_tag)
+
+    inc_path = os.path.expandvars(raw_inc)
+    lib_path = os.path.expandvars(raw_lib)
+
+    if not inc_path or (inc_path == raw_inc and ("${" in raw_inc or "%" in raw_inc)):
+        raise ValueError(f"Engine '{engine}' include directory is unset or unexpanded: {raw_inc}")
+    if not lib_path or (lib_path == raw_lib and ("${" in raw_lib or "%" in raw_lib)):
+        raise ValueError(f"Engine '{engine}' library file path is unset or unexpanded: {raw_lib}")
+
+    vcvars_key = "VCVARS32_PATH" if arch_tag == "X86" else "VCVARS64_PATH"
+    vcvars_path = args.vcvars or os.environ.get(vcvars_key, "")
+
+    validate_safe_path(inc_path, f"Engine '{engine}' include directory", is_dir=True, must_exist=True)
+    validate_safe_path(lib_path, f"Engine '{engine}' library file", is_dir=False, must_exist=True)
     validate_safe_path(cpp_source, "C++ source file path", is_dir=False, must_exist=True)
     validate_safe_path(dll_dest, "Output DLL path", is_dir=False, must_exist=False)
-    validate_safe_path(vcvars_path, "vcvars64.bat path", is_dir=False, must_exist=True)
+    validate_safe_path(vcvars_path, f"vcvars script ({args.arch})", is_dir=False, must_exist=True)
 
     compile_cmd = f'call {subprocess.list2cmdline([vcvars_path])} && '
 
@@ -886,14 +893,14 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
     telemetry = policy_data["configure"]["telemetry"]
 
     # Telemetry include paths
-    if telemetry and telemetry.get("logger") == "spdlog":
-        spdlog_inc_str = args.spdlog_include
-        if not spdlog_inc_str:
-            raise ValueError("spdlog logger is enabled in policy but --spdlog-include is not provided.")
+    spdlog_inc_str = args.spdlog_include
+    if spdlog_inc_str:
         spdlog_incs = [p.strip() for p in spdlog_inc_str.split(",") if p.strip()]
         for inc in spdlog_incs:
             validate_safe_path(inc, "spdlog include directory", is_dir=True, must_exist=True)
             cl_args.append(f'/I{inc}')
+    elif telemetry and telemetry.get("logger") == "spdlog":
+        raise ValueError("spdlog logger is enabled in policy but --spdlog-include is not provided.")
 
     if telemetry and telemetry.get("metrics") == "prometheus":
         prom_inc_str = args.prometheus_include
@@ -911,9 +918,9 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
 
     # Telemetry libraries
     if telemetry and telemetry.get("metrics") == "prometheus":
-        prom_libs_str = args.prometheus_libs
+        prom_libs_str = args.prometheus_libs or os.environ.get(f"PROMETHEUS_LIBS_{arch_tag}", "")
         if not prom_libs_str:
-            raise ValueError("prometheus metrics are enabled in policy but --prometheus-libs is not provided.")
+            raise ValueError(f"prometheus metrics are enabled in policy but --prometheus-libs or PROMETHEUS_LIBS_{arch_tag} is not provided.")
         prom_libs = [lib.strip() for lib in prom_libs_str.split(",") if lib.strip()]
         for lib in prom_libs:
             validate_safe_path(lib, "prometheus library file", is_dir=False, must_exist=True)
@@ -966,21 +973,17 @@ def main():
     parser.add_argument("policy", nargs="?", default="scada_policy.yaml", help="Path to the policy DSL file")
     parser.add_argument("--output-cpp", default="generated_hook.cpp", help="Destination path of generated C++ code")
     parser.add_argument("--output-dll", default="generated_hook.dll", help="Destination path of compiled Windows DLL")
+    parser.add_argument("--arch", choices=["x64", "x86"], default="x64", help="Target binary architecture: x64 (default) or x86")
     parser.add_argument("--libclang", default=DEFAULT_LIBCLANG_PATH, help="libclang.dll file path or containing directory")
-    parser.add_argument("--vcvars", default=DEFAULT_VCVARS_PATH, help="Absolute path to MSVC's vcvars64.bat script")
-    parser.add_argument("--detours-include", default=DEFAULT_DETOURS_INC, help="Microsoft Detours include directory")
-    parser.add_argument("--detours-lib", default=DEFAULT_DETOURS_LIB, help="Microsoft Detours static library (.lib) file path")
-    parser.add_argument("--frida-include", default=DEFAULT_FRIDA_INC, help="Frida-Gum include directory")
-    parser.add_argument("--frida-lib", default=DEFAULT_FRIDA_LIB, help="Frida-Gum static library (.lib) file path")
+    parser.add_argument("--vcvars", default=None, help="Absolute path to MSVC's vcvars script (defaults to VCVARS64_PATH or VCVARS32_PATH based on --arch)")
     parser.add_argument("--spdlog-include", default=DEFAULT_SPDLOG_INC, help="spdlog include directory")
     parser.add_argument("--prometheus-include", default=DEFAULT_PROMETHEUS_INC, help="prometheus-cpp include directory")
-    parser.add_argument("--prometheus-libs", default=DEFAULT_PROMETHEUS_LIBS, help="prometheus-cpp static libraries (.lib) file paths, comma-separated")
+    parser.add_argument("--prometheus-libs", default=None, help="prometheus-cpp static libraries (.lib) file paths, comma-separated (defaults to PROMETHEUS_LIBS_X64 or PROMETHEUS_LIBS_X86 based on --arch)")
     parser.add_argument("--rt-link", default="/MT", choices=["/MT", "/MD"], help="Runtime library link model: /MT (static) or /MD (dynamic)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--gen-only", action="store_true", help="Only render C++ template code without compiling")
     mode_group.add_argument("--compile-only", action="store_true", help="Only compile the existing output-cpp file")
     mode_group.add_argument("--validate-only", action="store_true", help="Only validate the policy YAML without generating or compiling code")
-    parser.add_argument("--engines-config", default=DEFAULT_ENGINES_CONFIG, help="Path to engines registry YAML configuration file")
     args = parser.parse_args()
 
     # Configure libclang path
@@ -989,13 +992,6 @@ def main():
             clang.cindex.Config.set_library_path(args.libclang)
         else:
             clang.cindex.Config.set_library_file(args.libclang)
-
-    global ENGINES
-    try:
-        ENGINES = load_engines(args.engines_config)
-    except Exception as e:
-        print(f"Error loading engines: {e}")
-        return 1
 
     if not args.compile_only and not os.path.exists(args.policy):
         print(f"Error: Policy DSL configuration file '{args.policy}' not found.")

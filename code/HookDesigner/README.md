@@ -17,6 +17,7 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
    - [Telemetry & Metrics Performance Guidelines](#telemetry--metrics-performance-guidelines)
    - [Telemetry Expressions & Pointer Dereferencing Safety](#telemetry-expressions--pointer-dereferencing-safety)
 4. [Template Architecture](#template-architecture)
+   - [Key Constants & Safety Bounds Rationale](#key-constants--safety-bounds-rationale)
 5. [Hooking Engine Abstraction](#hooking-engine-abstraction)
 6. [Build & Usage Guide](#build--usage-guide)
 7. [Limitations & Future Work](#limitations--future-work)
@@ -95,20 +96,16 @@ The transpiler supports three mutually exclusive operational modes:
 | `policy` | `scada_policy.yaml` | Path to the policy YAML file |
 | `--output-cpp` | `generated_hook.cpp` | Destination path for the generated C++ source |
 | `--output-dll` | `generated_hook.dll` | Destination path for the compiled DLL |
+| `--arch` | `x64` | Target binary architecture (`x64` or `x86`) |
 | `--libclang` | `$LIBCLANG_PATH` | Path to `libclang.dll` file or containing directory |
-| `--vcvars` | `$VCVARS64_PATH` | Path to MSVC's `vcvars64.bat` |
-| `--detours-include` | `$DETOURS_INC` | Detours header include directory |
-| `--detours-lib` | `$DETOURS_LIB` | Detours static library (`.lib`) path |
-| `--frida-include` | `$FRIDA_INC` | Frida-Gum header include directory |
-| `--frida-lib` | `$FRIDA_LIB` | Frida-Gum static library (`.lib`) path |
+| `--vcvars` | `auto` | Path to MSVC's `vcvars` script (defaults to `$VCVARS64_PATH` or `$VCVARS32_PATH` based on `--arch`) |
 | `--spdlog-include` | `$SPDLOG_INC` | Path to `spdlog` header include directory |
 | `--prometheus-include` | `$PROMETHEUS_INC` | Path to `prometheus-cpp` include directory |
-| `--prometheus-libs` | `$PROMETHEUS_LIBS` | Comma-separated paths to `prometheus-cpp` static `.lib` files |
+| `--prometheus-libs` | `auto` | Comma-separated paths to `prometheus-cpp` static `.lib` files (defaults to `$PROMETHEUS_LIBS_X64` or `$PROMETHEUS_LIBS_X86` based on `--arch`) |
 | `--rt-link` | `/MT` | MSVC runtime linking model (`/MT` static or `/MD` dynamic) |
 | `--gen-only` | `false` | Only render C++ without compiling |
 | `--compile-only` | `false` | Only compile existing C++ without parsing/generating |
 | `--validate-only` | `false` | Only validate the policy YAML |
-| `--engines-config` | `engines.yaml` | Path to the engine registry configuration file |
 
 > [!NOTE]
 > **Compiler Options**: When invoking MSVC `cl.exe`, the transpiler applies `/LD` (DLL generation), `/EHa` (asynchronous SEH structured exception handling to catch memory violations during string copying or pointer dereferencing), `/O2` (optimization), `/Zi` and `/FS` (PDB debug symbols), `/utf-8` (character encoding), `/std:c++17` (C++17 language standard), and automatically links required Windows system libraries including `ws2_32.lib` and `crypt32.lib` when Prometheus metrics are enabled.
@@ -577,7 +574,7 @@ Generates initialization code invoked inside `InitializeHooks()`:
 
 Generates runtime telemetry evaluation logic inside each `Hooked<FunctionName>` wrapper:
 
-- Evaluates log rules against runtime conditions and emits logs via `spdlog` (or `fmt::format` / `OutputDebugStringA`, if `logger` is None).
+- Evaluates log rules against runtime conditions and emits logs via `spdlog` (or `fmt::format`).
 - Evaluates counter, gauge, and histogram metric conditions.
 - Handles dynamic metric labels using trivial thread-local POD caching (`uint64_t` hash and pointer caching) for high-performance lock-free lookup on hot execution paths without dynamic TLS destructor overhead.
 
@@ -641,6 +638,30 @@ Each element in `hook.parameters` is a dictionary describing a function paramete
 | `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)`, `CopyString(...)`, or raw parameter) |
 | `safe_type` | `string` | Appropriate C++ type for storing/logging the value (e.g., `std::string` for string pointers) |
 
+### Key Constants & Safety Bounds Rationale
+
+HookDesigner relies on specific numerical constants across its templates for ejection synchronization, queue sizing, and memory bounds. Below is the technical rationale and safety trade-off for each value:
+
+#### 1. `2000 ms` — Total Drain Budget ($T_{\text{drain}}$)
+- **Source**: [`detours_template.cpp`](templates/detours_template.cpp#L258), [`frida_template.cpp`](templates/frida_template.cpp#L212)
+- **Rationale**: This budget is not designed to outlast a worst-case blocking call (e.g., a `recv()` call that could block for minutes — that is precisely what the controlled DLL leak fallback handles, not this timer). Instead, it acts as a **classification threshold**: distinguishing "ordinary hook executions still finishing up" from "a thread is genuinely stuck inside a blocking target call." A normal hook body (pre-hook, trampoline call, post-hook, telemetry) completes within microseconds to a few milliseconds. 2,000 ms is comfortably longer than that, absorbing OS scheduling jitter on a heavily loaded host. If `activeThreads` has not reached zero after 2 seconds, it provides a reliable signal that a thread is blocked deep inside the trampoline, at which point waiting longer would not help and falling through to the safe-leak path is the right call. It also provides an operator or an automated ejection script with a bounded, predictable wait rather than hanging indefinitely.
+
+#### 2. `1000 ms` — Confirmation Sleep
+- **Source**: [`detours_template.cpp`](templates/detours_template.cpp#L260), [`frida_template.cpp`](templates/frida_template.cpp#L215)
+- **Rationale**: This delay exists specifically to close a subtle race window during thread exit: `HookActiveThreads`'s destructor decrements `activeThreads` as the C++ stack unwinds, but a handful of epilogue machine instructions (register restoration, `ret`, and returning through the trampoline) still execute inside the DLL's mapped pages *after* that decrement and before the thread physically leaves the module. Unmapping the DLL the exact instant the counter hits zero risks a preempted thread faulting on now-unmapped memory mid-epilogue (`STATUS_ACCESS_VIOLATION`). The 1-second confirmation window comfortably outlasts that sliver of epilogue code even under severe scheduler contention on a multi-threaded host (where a worker thread can be preempted right at the worst possible instruction). Because ejection is not latency-critical (unlike hot-path hooking), waiting 1 extra second is a reasonable trade-off to eliminate this crash race.
+
+#### 3. `50 ms` — Poll Interval
+- **Source**: [`detours_template.cpp`](templates/detours_template.cpp#L266), [`frida_template.cpp`](templates/frida_template.cpp#L227)
+- **Rationale**: This defines the loop's polling granularity and is the least safety-critical of the timing constants. It bounds how much the loop can overshoot the 2,000 ms budget (in the worst case, by at most one extra interval, ~50 ms) without busy-spinning and burning 100% CPU on an otherwise idle wait. Unlike the drain budget and confirmation window, nothing in the safety argument strictly depends on 50 ms specifically — any small, responsive polling interval would suffice (it is a convenience constant rather than correctness-load-bearing).
+
+#### 4. `65,536` ($2^{16}$) — `spdlog` Async Queue Capacity
+- **Source**: [`_telemetry_init.cpp`](templates/_telemetry_init.cpp#L7)
+- **Rationale**: When critical hooked functions execute thousands of times per second across concurrent worker threads, each invocation can potentially emit multiple `log_rules`. The asynchronous queue must absorb worst-case bursts without blocking the producing worker thread while the background worker flushes records to disk or UDP Syslog. A power of two ($2^{16}$) enables lock-free ring-buffer implementations using cheap bitmask wrapping (`index & (size - 1)`) instead of expensive modulo arithmetic.
+
+#### 5. `128` — `CopyString` Default `maxChars` Bound
+- **Source**: [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L40), [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L49)
+- **Rationale**: This is a safety bound rather than a completeness bound. It caps the worst-case cost of scanning a corrupted, or non-null-terminated string pointer on the hot execution path (SIMD `strnlen` and `wcsnlen` never inspect beyond 128 characters, regardless of buffer contents). The explicit engineering trade-off is **silent truncation**: an identifier, file path, or registry subkey (e.g., in `RegOpenKeyExA`) longer than 128 characters is truncated with no explicit indication in the emitted log.
+
 ---
 
 ## Hooking Engine Abstraction
@@ -654,8 +675,8 @@ inline_hook:
   detours:
     template: "detours_template.cpp"
     cast_format: "(True{name}_t)"
-    libs_arg: "detours_lib"
-    inc_arg: "detours_include"
+    include_path: "${DETOURS_INC}"
+    lib_path: "${DETOURS_LIB_{ARCH}}"
     extra_libs:
       - "User32.lib"
       - "Advapi32.lib"
@@ -663,8 +684,8 @@ inline_hook:
   frida:
     template: "frida_template.cpp"
     cast_format: "(gpointer)"
-    libs_arg: "frida_lib"
-    inc_arg: "frida_include"
+    include_path: "${FRIDA_INC_{ARCH}}"
+    lib_path: "${FRIDA_LIB_{ARCH}}"
     extra_libs:
       - "User32.lib"
       - "Advapi32.lib"
@@ -678,8 +699,8 @@ inline_hook:
 |-------|----------|-------------|
 | `template` | Yes | Jinja2 template filename (in `templates/` directory) |
 | `cast_format` | Yes (for `inline_hook`) | Python format string for casting `GetProcAddress` results. `{name}` is replaced with the function name. |
-| `libs_arg` | Yes | Name of the CLI argument providing the engine's static library path (maps to `argparse` attribute) |
-| `inc_arg` | Yes | Name of the CLI argument providing the engine's include directory (maps to `argparse` attribute) |
+| `include_path` | Yes | Engine header include directory path. Supports `${VAR}` environment variable expansion and `{ARCH}` placeholder (resolved dynamically to `X64` or `X86` based on `--arch`). |
+| `lib_path` | Yes | Engine static library (`.lib`) file path. Supports `${VAR}` environment variable expansion and `{ARCH}` placeholder (resolved dynamically to `X64` or `X86` based on `--arch`). |
 | `extra_libs` | No (default `[]`) | Additional Windows `.lib` files or paths to link |
 
 ### Engine Selection Guidelines: Detours vs. Frida-Gum for Low-Level APIs
@@ -827,19 +848,28 @@ When the policy specifies multiple engines, output files are automatically suffi
 
 ### Injecting the DLL
 
-**Into a running process**:
+HookDesigner supports both 64-bit and 32-bit processes. The injector and target process must match in bitness (run `build_injectors.bat` to compile both `injector64.exe` and `injector32.exe`):
+
+**For 64-bit targets (x64)**:
 ```cmd
-injector.exe inject <PID> hook.dll
+python transpiler.py policy.yaml --arch x64 --output-dll hook.dll
+injector64.exe inject <PID> hook.dll
+```
+
+**For 32-bit targets (x86)**:
+```cmd
+python transpiler.py policy.yaml --arch x86 --output-dll hook32.dll
+injector32.exe inject <PID> hook32.dll
 ```
 
 **Launch a new process with injection**:
 ```cmd
-injector.exe launch scada_engine.exe hook.dll
+injector64.exe launch scada_engine.exe hook.dll
 ```
 
 **Eject a previously injected DLL**:
 ```cmd
-injector.exe eject <PID> hook.dll
+injector64.exe eject <PID> hook.dll
 ```
 
 ---
