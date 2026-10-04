@@ -23,6 +23,9 @@
 % acronym (https://ctan.org/pkg/acronym) is a package to expand acronyms after their first usage
 \usepackage{acronym}
 
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
 % the hyperref package provides links; with this configuration they are colored
 % according to the scheme described in https://tex.stackexchange.com/a/525297
 \usepackage{xcolor}
@@ -125,6 +128,20 @@
   stringstyle=\color{red}\ttfamily,
   sensitive=true
 }
+
+\lstdefinelanguage{yaml}{
+  keywords={true,false,null,y,n,yes,no,True,False,TRUE,FALSE,NULL,on,off},
+  keywordstyle=\color[rgb]{0,0,1}\bfseries,
+  basicstyle=\ttfamily\footnotesize,
+  sensitive=false,
+  comment=[l]{\#},
+  commentstyle=\color[rgb]{0.133,0.545,0.133},
+  stringstyle=\color[rgb]{0.627,0.126,0.941},
+  morestring=[b]',
+  morestring=[b]",
+  mathescape=false
+}
+\lstalias{YAML}{yaml}
 
 \lstset{
   basicstyle=\ttfamily\small,

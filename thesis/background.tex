@@ -1,10 +1,11 @@
+% !TeX root = main.tex
 \chapter{Background}
 \label{ch:background}
 
-This chapter begins by introducing the foundational concepts of binary instrumentation within a Windows environment necessary to understand the proposed work.
-Subsequently, it analyzes state-of-the-art frameworks utilized for binary instrumentation. This overview is essential for contextualizing the compilation targets selected for our Domain-Specific Language (DSL), which are discussed in detail in \fullref{ch:method}.
+This chapter begins by introducing the foundational concepts of \ac{DBI} within a Windows environment necessary to understand the proposed work.
+Subsequently, it analyzes state-of-the-art frameworks utilized for \ac{DBI}. This overview is essential for contextualizing the compilation targets selected for our Domain-Specific Language (DSL), which are discussed in detail in \fullref{ch:method}.
 
-As discussed in \fullref{ch:introduction}, binary instrumentation allows us to change the runtime behavior of a binary, injecting a compiled payload into an existing executable.
+As discussed in \fullref{ch:introduction}, \ac{DBI} allows us to change the runtime behavior of a binary, injecting a compiled payload into an existing executable.
 
 \section{The Application Binary Interface (ABI)}
 \label{sec:abi}
@@ -16,7 +17,7 @@ These rules are formalized as \emph{Calling Conventions}.
 The complexity of ABI compliance and the risk of runtime crashes depend heavily on the target architecture.
 
 \subsection*{Windows x86 (32-bit) Architecture}
-In 32-bit environments, multiple calling conventions coexist, requiring developer-level alignment between the instrumentation target function and the injected payload implementation.
+In 32-bit environments, multiple calling conventions coexist~\cite{doc:msvc_x86_calling_conventions}, requiring developer-level alignment between the instrumentation target function and the injected payload implementation.
 The most common conventions include:
 \begin{itemize}
 	\item \texttt{\_\_cdecl}: Arguments are pushed onto the stack from right to left, and the \emph{caller} cleans the stack.
@@ -29,10 +30,10 @@ The most common conventions include:
 \end{itemize}
 Across these 32-bit conventions, registers are typically divided into \emph{scratch registers} (\texttt{EAX}, \texttt{ECX}, and \texttt{EDX}), which the caller assumes can be freely overwritten by the called function, and \emph{callee-saved registers} (\texttt{EBX}, \texttt{ESI}, \texttt{EDI}, and \texttt{EBP}), which the called function is contractually required to preserve and restore before returning.
 The \texttt{\_\_vectorcall} convention changes this splitting by expanding the scratch registers set to include vector registers.
-Understanding and matching these different conventions is critical for binary instrumentation on x86.
+Understanding and matching these different conventions is critical for \ac{DBI} on x86.
 
 \subsection*{Windows x64 (64-bit) Architecture}
-To eliminate the complexity of managing multiple incompatible conventions, Windows x64 introduces a single, unified calling convention (a standard x64 ABI).
+To eliminate the complexity of managing multiple incompatible conventions, Windows x64 introduces a single, unified calling convention (a standard x64 ABI)~\cite{doc:msvc_x64_calling_conventions}.
 In this environment, legacy keywords like \texttt{\_\_cdecl}, \texttt{\_\_stdcall}, and \texttt{\_\_fastcall} are accepted by the compiler for backward compatibility but are syntactically ignored.
 The x64 calling convention utilizes a register-based parameter passing scheme alongside a strict register preservation contract:
 \begin{itemize}
@@ -46,18 +47,18 @@ The x64 calling convention utilizes a register-based parameter passing scheme al
 		\item \emph{Non-Volatile (Callee-Saved):} Registers \texttt{RBX}, \texttt{RBP}, \texttt{RDI}, \texttt{RSI}, \texttt{R12}--\texttt{R15}, and \texttt{XMM6}--\texttt{XMM15} must remain preserved across calls. If a called routine needs to utilize any non-volatile register, it is contractually obligated to save the original value in the function prologue (typically via stack pushes) and restore it in the epilogue prior to returning.
 	\end{itemize}
 \end{itemize}
-From the perspective of binary instrumentation, the single-ABI model of x64 provides an inherent safety net: because the compiler forces both the target process and the injected payload to use the exact same assembly-level rules, calling convention mismatches are impossible.
+From the perspective of \ac{DBI}, the single-ABI model of x64 provides an inherent safety net: because the compiler forces both the target process and the injected payload to use the exact same assembly-level rules, calling convention mismatches are impossible.
 However, when writing portable instrumentation code intended to be compiled for both architectures, developers must still explicitly specify calling conventions (e.g., using macros like \texttt{WINAPI}) to prevent stack and registers corruption when the codebase is built for x86 targets.
 
 \section{Dynamic-Link Libraries}
 \label{sec:dll_foundations}
 
-To perform binary instrumentation in modern Windows environments, external instrumentation code must execute directly within the target application's execution context. In Windows, this is universally achieved through Dynamic-Link Libraries (\acp{DLL}) and process injection.
+To perform \ac{DBI} in modern Windows environments, external instrumentation code must execute directly within the target application's execution context. In Windows, this is commonly achieved through Dynamic-Link Libraries (\acp{DLL}) and process injection.
 
 \subsection{Static vs. Dynamic Linking}
 Under the \emph{static linking model}, all external functions and dependencies required by an application are permanently integrated into the final executable (EXE) file at link time. While this ensures that the application is fully self-contained, it introduces severe inefficiencies: every program on disk contains redundant copies of library code, and multiple running programs allocate separate physical RAM pages for the same helper routines.
 
-\emph{Dynamic linking} instead defers the binding of external library functions until runtime. A \ac{DLL} is an independent binary executable module that contains functions, resources, and data that can be called dynamically by other modules or applications. Rather than duplicating library code inside every host application on disk, the operating system maintains a single standalone \ac{DLL} file. When multiple processes load the library, the operating system loader maps the same physical code pages in RAM into each process's virtual address space, drastically reducing both disk footprint and physical memory consumption.
+\emph{Dynamic linking} instead defers the binding of external library functions until runtime~\cite[Ch.10]{book:levine2000linkers}. A \ac{DLL} is an independent binary executable module that contains functions, resources, and data that can be called dynamically by other modules or applications. Rather than duplicating library code inside every host application on disk, the operating system maintains a single standalone \ac{DLL} file. When multiple processes load the library, the operating system loader maps the same physical code pages in RAM into each process's virtual address space, drastically reducing both disk footprint and physical memory consumption.
 
 
 \subsection{Address Space Isolation and Virtual Memory Mapping}
@@ -69,8 +70,8 @@ To enable shared libraries to execute without violating this isolation model, th
 \subsection{DLL Injection and Instrumentation Lifecycle}
 \label{subsec:dll_injection}
 
-Because virtual memory mapping allows a \ac{DLL} to execute inside a process's private address space, \acp{DLL} represent the primary vehicle for Windows binary instrumentation. However, because target applications are unaware of our instrumentation, the framework must force the target to load the payload from the outside.
-This is achieved through \emph{\ac{DLL} Injection}. The standard injection technique leverages the Windows \ac{API} functions \texttt{VirtualAllocEx}, \texttt{WriteProcessMemory}, and \texttt{CreateRemoteThread} targeting \texttt{LoadLibrary}. The injector process allocates memory in the remote target, writes the absolute path of the instrumentation \ac{DLL}, and spawns a remote thread pointing to \texttt{LoadLibrary}, which executes within the target process and triggers the OS loader to map the \ac{DLL}.
+Because virtual memory mapping allows a \ac{DLL} to execute inside a process's private address space, \acp{DLL} represent the primary vehicle for Windows \ac{DBI}. However, because target applications are unaware of our instrumentation, the framework must force the target to load the payload from the outside.
+This is achieved through \emph{\ac{DLL} Injection}~\cite{mitre:t1055_001}. The standard injection technique leverages the Windows \ac{API} functions \texttt{VirtualAllocEx}, \texttt{WriteProcessMemory}, and \texttt{CreateRemoteThread} targeting \texttt{LoadLibrary}. The injector process allocates memory in the remote target, writes the absolute path of the instrumentation \ac{DLL}, and spawns a remote thread pointing to \texttt{LoadLibrary}, which executes within the target process and triggers the OS loader to map the \ac{DLL}.
 Once mapped into the target process, \acp{DLL} provide an automatic lifecycle management mechanism via the entry point function, \texttt{DllMain} (\cref{lst:dllMain}):
 \begin{enumerate}
 	\item \emph{Automatic Initialization (\texttt{DLL\_PROCESS\_ATTACH}):} Invoked automatically by the Windows loader immediately after the \ac{DLL} is mapped into the process, allowing the framework to resolve target APIs and apply hooks.
@@ -96,19 +97,19 @@ Once mapped into the target process, \acp{DLL} provide an automatic lifecycle ma
 		}
 	\end{lstlisting}
 
-\section{Paradigms of Binary Instrumentation}
+\section{Paradigms of DBI}
 
-Modern instrumentation engines generally fall into two broad architectural paradigms:
+Modern \ac{DBI} engines generally fall into two broad architectural paradigms:
 \begin{itemize}
 	\item \emph{Inline Hooking:} this paradigm involves modifying the original execution flow via localized jumps.
 	It patches specific functions in memory, redirecting execution to a custom payload before returning to the original flow.
-	\item \emph{Dynamic Binary Instrumentation:} rather than modifying the original binary in place, \ac{DBI} engines copy, recompile, and execute instructions inside a localized sandbox known as a Code Cache.
+	\item \emph{Code-Cache-Based \ac{DBI}:} rather than modifying the original binary in place, \ac{DBI} engines copy, recompile, and execute instructions inside a localized sandbox known as a Code Cache.
 \end{itemize}
 
 \subsection{Execution Context and CPU State Preservation}
 \label{subsec:state_pres}
 
-Building upon the constraints of the ABI \cref{sec:abi}, it is necessary to formally define what constitutes the execution context of a running process and why preserving it is paramount to process stability during any paradigm of binary instrumentation.
+Building upon the constraints of the ABI \cref{sec:abi}, it is necessary to formally define what constitutes the execution context of a running process and why preserving it is paramount to process stability during any paradigm of \ac{DBI}.
 
 At any given nanosecond, the exact state of an executing thread is represented by the data held within the CPU's internal registers.
 When an instrumentation framework intercepts the execution flow, it redirects the instruction pointer to the user's custom analysis payload.
@@ -138,10 +139,10 @@ A standard inline hook consists of three primary logical components:
 	Conceptually, the trampoline is a dynamically allocated, executable memory buffer that must fulfills two architectural mandates: it securely relocates the displaced prologue instructions and unconditionally routes the instruction pointer back to the unpatched remainder of the target function.
 \end{enumerate}
 
-\subsection{Bare-Metal Hooking: Microsoft Detours and MinHook}
+\subsection{Signature-Enforced Hooking: Microsoft Detours and MinHook}
 \label{subsec:bare_metal_hooking}
-Frameworks like Microsoft Detours and MinHook are specifically designed for Windows x86/x64 and utilize a \emph{``bare-metal'' routing} approach.
-In this model, the hooking library has zero awareness of the CPU state at runtime.
+Frameworks like Microsoft Detours~\cite{DBLP:conf/usenix-nt/HuntB99} and MinHook~\cite{repo:minhook} are the well-known standard for Windows x86/x64.
+In this models, the hooking library has zero awareness of the CPU state at runtime.
 Consequently, they strictly enforce the \ac{ABI}. The developer must possess precise knowledge of the target C/C++ signatures (parameter types, argument order, and return type) and calling conventions (particularly on 32-bit x86 architectures where multiple calling conventions coexist).
 Using these two frameworks requires a strict type definition of the target function pointer to avoid stack corruption and register mismatches, as illustrated in \cref{lst:detours}.
 
@@ -196,11 +197,11 @@ Here, we intercept the user's choice (\texttt{result}), forcing a ``yes'' outcom
 	}
 \end{lstlisting}
 
-\subsection{Cross-Platform Hooking: Frida-Gum}
+\subsection{Context-Aware Hooking: Frida-Gum}
 \label{subsec:frida_arch}
-Frida-Gum is the underlying low-level C library of the Frida instrumentation toolkit, representing a modern, multi-architecture approach to binary instrumentation (supporting x86/x64, ARM/ARM64, MIPS).
+Frida-Gum~\cite{repo:frida-gum} is the underlying low-level C library of the Frida instrumentation toolkit, representing a modern, multi-architecture approach to \ac{DBI} (supporting x86/x64, ARM/ARM64, MIPS).
 
-At the core of Frida-Gum engine is a centralized execution dispatcher: when an intercepted target function is invoked, execution jumps not directly to the detour function, but into a dynamically generated entry thunk. that saves the CPU state into an architecture-agnostic \texttt{GumCpuContext} structure and trigger the dispatcher, that automatically orchestrate the hook execution flow.
+At the core of Frida-Gum engine is a centralized execution dispatcher: when an intercepted target function is invoked, execution jumps not directly to the detour function, but into a dynamically generated entry thunk. The entry thunk saves the CPU state into an architecture-agnostic \texttt{GumCpuContext} structure and trigger the dispatcher, that automatically handle the entire hook execution flow.
 
 Unlike traditional single-paradigm frameworks like Detours or MinHook, Frida-Gum provides a flexible, dual-paradigm Interceptor \ac{API} comprising \emph{Invocation Listener Mode} and \emph{Function Replacement Mode}
 
@@ -242,11 +243,11 @@ While Invocation Listener Mode offers architecture abstraction, it introduces an
 \subsubsection{Function Replacement Mode}
 \label{subsec:frida_modes}
 
-To overcome the limitations of index-based parameter extraction and achieve parity with bare-metal frameworks, Frida-Gum exposes \emph{Function Replacement Mode} via \texttt{gum\_interceptor\_replace} and \texttt{gum\_interceptor\_replace\_fast}.
+To overcome the limitations of index-based parameter extraction and achieve parity with traditional frameworks, Frida-Gum exposes \emph{Function Replacement Mode} via \texttt{gum\_interceptor\_replace} and \texttt{gum\_interceptor\_replace\_fast}.
 
 \begin{enumerate}
 	\item \textbf{Standard Replacement (\texttt{gum\_interceptor\_replace}):} Execution passes through Frida-Gum's \texttt{enter\_thunk}, where \texttt{GumCpuContext} captures the CPU state and triggers the dispatcher (identical to Invocation Listener Mode). However, instead of invoking high-level callback listeners and then jumping to the original function, the dispatcher redirects execution to a user-defined replacement function—acting as a standard C/C++ detour payload similar to Detours or MinHook (also here strict ABI compliance must be ensured). Crucially, all CPU registers (including \texttt{XMM0}--\texttt{XMM7}) are restored prior to entering the replacement function, allowing the C/C++ compiler to handle float parameters passing natively via standard C signatures.
-	\item \textbf{Fast Replacement (\texttt{gum\_interceptor\_replace\_fast}):} Emits a direct assembly \texttt{JMP} instruction from the target prologue straight to the replacement function, bypassing Frida-Gum's dispatcher and \texttt{GumCpuContext} creation entirely, yielding an execution flow identical to bare-metal frameworks like Detours and MinHook.
+	\item \textbf{Fast Replacement (\texttt{gum\_interceptor\_replace\_fast}):} Emits a direct assembly \texttt{JMP} instruction from the target prologue straight to the replacement function, bypassing Frida-Gum's dispatcher and \texttt{GumCpuContext} creation entirely, yielding an execution flow identical to traditional frameworks like Detours and MinHook.
 \end{enumerate}
 
 The equivalent Function Replacement implementation for \texttt{MessageBoxW} is illustrated in \cref{lst:frida_replace}.
@@ -288,17 +289,17 @@ The equivalent Function Replacement implementation for \texttt{MessageBoxW} is i
 	
 \end{lstlisting}
 
-\subsection{Hook Orchestration}
-\label{subsec:hook_orchestration}
+\subsection{Hook Execution Flow}
+\label{subsec:hook_dispatch}
 
-While all the presented frameworks utilize inline prologue patching, the way in which engines orchestrate hook execution flow differs:
+While all the presented frameworks utilize inline prologue patching, the way in which engines dispatch hook execution flow differs:
 
 \begin{itemize}
-	\item \textbf{Passive Orchestration (Detours, MinHook, Frida Fast Replacement):} Overwrites the target prologue with a direct assembly jump (\texttt{JMP}) to the injected payload. The engine acts purely as a passive observer, delegating all execution routing and state management entirely to the user-written detour function.
+	\item \textbf{Passive Dispatch (Detours, MinHook, Frida Fast Replacement):} Overwrites the target prologue with a direct assembly jump (\texttt{JMP}) to the injected payload. The engine acts purely as a passive observer, delegating all execution routing and state management entirely to the user-written detour function.
 	
-	\item \textbf{Active Orchestration (Frida Invocation Listener Mode):} Execution jumps into a framework-managed dispatcher. It automatically orchestrates CPU register serialization (\texttt{GumCpuContext}), and optional user-defined callbacks before transferring control to the target function.
+	\item \textbf{Active Dispatch (Frida Invocation Listener Mode):} Execution jumps into a framework-managed dispatcher. It automatically dispatchs CPU register serialization (\texttt{GumCpuContext}), and optional user-defined callbacks before transferring control to the target function.
 	
-	\item \textbf{Hybrid Orchestration (Frida Standard Replacement Mode):} Combines active dispatcher with user-controlled execution routing. The engine intercepts execution via its active dispatcher, but then yields execution control to a user-defined replacement function. The replacement function acts as an autonomous detour function, with the same structure seen in passive orchestration frameworks.
+	\item \textbf{Hybrid Dispatch (Frida Standard Replacement Mode):} Combines active dispatcher with user-controlled execution routing. The engine intercepts execution via its active dispatcher, but then yields execution control to a user-defined replacement function. The replacement function acts as an autonomous detour function, with the same structure seen in passive dispatch frameworks.
 \end{itemize}
 
 To visually illustrate these operational differences, \cref{fig:instrumentation_comparison} contrasts the direct, user-managed routing (\cref{fig:Det}) with the dispatcher-mediated execution path (\cref{fig:Frida}).
@@ -326,24 +327,24 @@ To visually illustrate these operational differences, \cref{fig:instrumentation_
 	\label{fig:instrumentation_comparison}
 \end{figure}
 
-\subsubsection{Advantages of Dispatcher-Mediated Orchestration}
+\subsubsection{Advantages of Engine-Mediated Dispatch}
 \label{subsubsec:advantages}
 
-Frida-Gum employs a framework dispatcher in both Invocation Listener (active) and Standard Replacement (hybrid) modes to deliver useful capabilities that traditional bare-metal frameworks do not automatically provide:
+Frida-Gum employs a framework dispatcher in both Invocation Listener (active) and Standard Replacement (hybrid) modes to deliver useful capabilities that traditional frameworks do not automatically provide:
 
 \begin{enumerate}
-	\item \textbf{Multi-Listener Hook (Active Orchestration):} With Detours or MinHook, developers are forced to manage fragile, nested chains of function pointers when multiple hooks target the same function. In contrast, Frida-Gum's active dispatcher maintains an internal list of subscribers (\texttt{listener\_entries}) inside target related internal structure \texttt{GumFunctionContext}. The active dispatcher sequentially invokes the \texttt{on\_enter} and \texttt{on\_leave} callbacks of all attached listeners (e.g., logging, security monitoring) in a single execution pass without requiring individual listeners to be aware of one another.
+	\item \textbf{Multi-Listener Hook (Active dispatch):} With Detours or MinHook, developers are forced to manage fragile, nested chains of function pointers when multiple hooks target the same function. In contrast, Frida-Gum's active dispatcher maintains an internal list of subscribers (\texttt{listener\_entries}) inside target related internal structure \texttt{GumFunctionContext}. The active dispatcher sequentially invokes the \texttt{on\_enter} and \texttt{on\_leave} callbacks of all attached listeners (e.g., logging, security monitoring) in a single execution pass without requiring individual listeners to be aware of one another.
 	
 	\item \textbf{Built-in Thread Tracking for Safe Detachment (\texttt{gum\_interceptor\_flush}):} The active dispatcher automatically maintains an internal thread counter inside \texttt{GumFunctionContext}, incrementing it upon entry (\texttt{enter\_thunk}) and decrementing it upon completion (\texttt{leave\_thunk}). This provides native support for safe framework detachment: calling \texttt{gum\_interceptor\_flush()} blocks until this counter reaches zero, verifying that no worker threads remain inside hook logic before the module is unmapped.
 	
-	\item \textbf{Automatic CPU State Preservation:} In bare-metal hooking, register preservation relies entirely on compiler-generated instructions matching the exact target ABI; any convention mismatch risks register corruption and crashes. In contrast, Frida-Gum's active dispatcher automatically serializes all CPU hardware registers into an architecture-agnostic \texttt{GumCpuContext} structure upon entry and restores them upon exit. Exposed to callbacks via \texttt{gum\_invocation\_context\_get\_cpu\_context(ic)}, this mechanism guarantees process state integrity across supported architectures while allowing developers to safely inspect, log General-Purpose Registers dynamically at runtime.
+	\item \textbf{Automatic CPU State Preservation:} In traditional hooking, register preservation relies entirely on compiler-generated instructions matching the exact target ABI; any convention mismatch risks register corruption and crashes. In contrast, Frida-Gum's active dispatcher automatically serializes all CPU hardware registers into an architecture-agnostic \texttt{GumCpuContext} structure upon entry and restores them upon exit. Exposed to callbacks via \texttt{gum\_invocation\_context\_get\_cpu\_context(ic)}, this mechanism guarantees process state integrity across supported architectures while allowing developers to safely inspect or modify General-Purpose Registers dynamically at runtime.
 \end{enumerate}
 
 \subsubsection{Architectural Trade-offs and the Fast Replacement Bypass}
 
-Despite their capabilities, active and hybrid orchestration introduce a non-trivial performance trade-off. Execution through the framework's centralized dispatcher (\texttt{enter\_thunk}) requires allocating memory for context structures and executing multiple CPU register serializations on every function invocation. For high-frequency target routines executed millions of times per second (e.g., memory allocations or critical section acquisitions), this additional CPU overhead can degrade execution speed compared to bare-metal passive jumps.
+Despite their capabilities, active and hybrid dispatch introduce a non-trivial performance trade-off. Execution through the framework's centralized dispatcher (\texttt{enter\_thunk}) requires allocating memory for context structures and executing multiple CPU register serializations on every function invocation. For high-frequency target routines executed millions of times per second (e.g., memory allocations or critical section acquisitions), this additional CPU overhead can degrade execution speed compared to  passive jumps.
 
-This latency penalty explains the primary role of Frida-Gum's \emph{Fast Replacement Mode} (\texttt{gum\_interceptor\_replace\_fast}). By emitting a raw assembly \texttt{JMP} instruction directly from the target prologue to the replacement payload, fast replacement bypasses the \texttt{enter\_thunk} dispatcher and \texttt{GumCpuContext} creation entirely. This design trades listener chaining and context serialization for bare-metal execution speed and minimal latency.
+This latency penalty explains the primary role of Frida-Gum's \emph{Fast Replacement Mode} (\texttt{gum\_interceptor\_replace\_fast}). By emitting a raw assembly \texttt{JMP} instruction directly from the target prologue to the replacement payload, fast replacement bypasses the \texttt{enter\_thunk} dispatcher and \texttt{GumCpuContext} creation entirely. This design trades listener chaining and context serialization for minimal hook latency.
 
 \subsection{Instruction Boundaries and the Role of Disassemblers}
 
@@ -368,74 +369,92 @@ The choice of disassembler heavily impacts the footprint and dependencies of the
 \subsection{Transactional Patching}
 \label{subsec:transactional_patching}
 
-A critical challenge in inline hooking is applying the memory patch (the \texttt{JMP} instruction) to a live, running process without causing a \emph{race condition}.
+A critical challenge in inline hooking is applying the memory patch (the \texttt{JMP} instruction) to a live, executing process without inducing a \emph{race condition}.
 
-In a multi-threaded application, if one thread attempts to execute a target function at the exact moment the instrumentation framework is overwriting its prologue, the CPU may attempt to execute a partially written, invalid instruction.
-To guarantee thread safety during the patching phase (both attaching and detaching), modern instrumentation frameworks implement a \emph{transactional model}.
+In a multi-threaded application, if a worker thread attempts to execute a target function's prologue at the exact instant the instrumentation framework is overwriting its bytes, the CPU may decode a partially written, invalid opcode, triggering an immediate process crash.
+To prevent this, instrumentation frameworks implement a \emph{transactional model}.
+However, the concrete mechanism used to guarantee concurrency safety diverges significantly depending on the design of the engine.
+The presented frameworks fall into two paradigms: \emph{Pessimistic Stop-the-World Relocation} and \emph{Optimistic Non-Blocking Batching}.
 
-Instead of patching memory directly and immediately, the developer queues the hooks.
-When the transaction is finalized, the framework briefly suspends all threads in the target process (except the one applying the patch) and writes the bytes to memory atomically.
-Crucially, simply suspending the threads is not sufficient. A thread might have been suspended at the exact moment its Instruction Pointer (\ac{IP}, i.e., \texttt{EIP}/\texttt{RIP}) was pointing to the instructions inside the prologue that are about to be overwritten.
-To prevent this, the framework provide a utility (\texttt{DetourUpdateThread}) that inspect the register context of the specified thread.
-If this thread's \ac{IP} is detected within the address range of the code being replaced, the framework dynamically relocates the \ac{IP} to the corresponding instruction inside the trampoline (when attaching a hook) or back to the restored original instructions (when detaching a hook) before resuming execution.
+\subsubsection{Pessimistic Stop-the-World: Thread Enlistment and IP Relocation}
 
-\emph{Detours} makes this transaction explicitly visible to the developer. The \ac{API} requires opening a transaction, manually declaring which threads need to be stopped, attaching/detaching the specified hooks, and committing the transaction, as illustrated in \cref{lst:detours_lifecycle}.
+Frameworks tailored natively for Windows, such as \emph{Microsoft Detours} and \emph{MinHook}, follow a pessimistic synchronization model.
+Before modifying target memory, the framework temporarily suspends all concurrent worker threads in the process.
 
-\begin{lstlisting}[language=C++, caption={Microsoft Detours transactional model for safe attachment and detachment.}, label={lst:detours_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-	// --- SAFE ATTACHMENT ---
+Crucially, simply suspending threads is insufficient on its own.
+A worker thread might have been preempted at the exact moment its Instruction Pointer (\ac{IP}, i.e., \texttt{EIP}/\texttt{RIP}) was positioned within the byte range of the prologue being overwritten.
+If resumed naively, the thread would execute the newly written destination address of the detour jump as raw machine code, corrupting execution.
+To prevent this, the framework inspects the register context of each thread (\texttt{GetThreadContext}).
+If a thread's \ac{IP} falls within the replaced address range, the framework dynamically adjusts the \ac{IP} to point to the corresponding relocated instruction inside the trampoline (when attaching) or back to the restored prologue bytes (when detaching).
+
+\emph{Microsoft Detours} makes this transaction explicitly developer-managed.
+The developer begins a transaction, explicitly enumerates and enlists every thread via \texttt{DetourUpdateThread}, queues the hook attachments or detachments, and commits the transaction, as illustrated in \cref{lst:detours_lifecycle}.
+During \texttt{DetourTransactionCommit}, Detours suspends the enlisted threads, verifies and relocates their instruction pointers, applies the patches, flushes the CPU instruction cache, and resumes execution.
+
+\begin{lstlisting}[language=C++, caption={Microsoft Detours transactional model with explicit thread enlistment and IP relocation.}, label={lst:detours_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+	// ATTACHMENT
+	
 	// Start the transaction
 	DetourTransactionBegin();
 	
-	// Enlist threads to be suspended during the patch
+	// Enlist threads whose instruction pointers must be inspected and relocated
 	DetourUpdateThread(GetCurrentThread()); 
-	// here we specify possible other threads we want to stop...
+	for (HANDLE hThread : workerThreads) {
+	    DetourUpdateThread(hThread);
+	}
 	
-	// Queue the hooks
+	// Queue the hook attachments
 	DetourAttach(&(PVOID&)TrueMessageBoxW, HookedMessageBoxW);
-	// here we specify possible other hooks we want to inject...
 	
-	// Apply patches atomically, suspending the specified threads and flushing the instruction cache
+	// Atomically suspend enlisted threads, rewrite IPs, patch bytes, and resume
 	DetourTransactionCommit();
 	
-	// --- SAFE DETACHMENT ---
+	// DETACHMENT
 	DetourTransactionBegin();
 	
 	DetourUpdateThread(GetCurrentThread());
-	// here we specify possible other threads we want to stop...
+	// here we specify possible other threads we want to be inspected...
 	
 	DetourDetach(&(PVOID&)TrueMessageBoxW, HookedMessageBoxW);
-	// Queue removal
 	// here we specify possible other hooks we want to detach...
 	
+	// Atomically suspend threads, restore prologue bytes, fixup IPs, and resume
 	DetourTransactionCommit();
-	// Suspends threads, restores original bytes, resumes
 \end{lstlisting}
 
-\emph{MinHook} abstracts the explicit transaction start and end calls, but enforces the exact same synchronization internally when hooks are enabled or disabled. This behavior is shown in \cref{lst:minhook_lifecycle}.
+\emph{MinHook} adopts the exact same underlying mechanism but abstracts the transaction boundaries from the public API (\cref{lst:minhook_lifecycle}).
+Internally, when \texttt{MH\_EnableHook} or \texttt{MH\_DisableHook} is invoked, the library enumerates process threads via a Toolhelp32 snapshot, suspends them, performs instruction-pointer relocation, applies the patch, and resumes the threads.
 
 \begin{lstlisting}[language=C++, caption={MinHook internal thread synchronization during enable/disable phases.}, label={lst:minhook_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-	// --- SAFE ATTACHMENT ---
+	// ---  ATTACHMENT ---
 	MH_CreateHook(&MessageBoxW, &HookedMessageBoxW, reinterpret_cast<LPVOID*>(&fpMessageBoxW));
-	// here we specify possible other hooks we want to inject...
 	
-	// MH_EnableHook internally suspends threads, writes the JMP, and resumes
+	// MH_EnableHook internally captures snapshots, suspends threads, rewrites IPs, and resumes
 	MH_EnableHook(&MessageBoxW);
 	//or MH_EnableHook(MH_ALL_HOOKS); if we have more than one hook
 	
-	// --- SAFE DETACHMENT ---
-	// MH_DisableHook internally suspends threads, restores original bytes, and resumes
+	// ---  DETACHMENT ---
+	// MH_DisableHook internally suspends threads, restores original bytes, rewrites IPs, and resumes
 	MH_DisableHook(&MessageBoxW);
 	//or MH_DisableHook(MH_ALL_HOOKS); if we have more than one hook
 \end{lstlisting}
 
-\emph{Frida-Gum} employs a similar transactional safety model through its Interceptor \ac{API}, as presented in \cref{lst:frida_lifecycle}. During attach and detach phases, atomic transaction boundaries (\texttt{gum\_interceptor\_begin\_transaction} / \texttt{end\_transaction}) batch memory patch modifications.
+\subsubsection{Optimistic Non-Blocking Batching: Frida-Gum Transactions}
 
-\begin{lstlisting}[language=C++, caption={Frida-Gum transactional lifecycle for Function Replacement and Invocation Listener modes.}, label={lst:frida_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+In contrast to Detours and MinHook, \emph{Frida-Gum} was designed as a cross-platform instrumentation runtime (supporting Windows, Linux, macOS, Android, and iOS).
+In cross-platform environments, suspending all running threads across a process is either not exposed by operating system primitives or heavily restricted by sandboxing.
+
+Consequently, Frida-Gum does \emph{not} implement thread enlisting, process-wide thread suspension, or register context inspection during hook installation.
+Instead, Frida-Gum's transactional API (\texttt{gum\_interceptor\_begin\_transaction} and \texttt{gum\_interceptor\_end\_transaction}) serves as a \emph{staging and batching boundary}, as shown in \cref{lst:frida_lifecycle}:
+
+
+\begin{lstlisting}[language=C++, caption={Frida-Gum transactional lifecycle for staged, batched function replacement.}, label={lst:frida_lifecycle}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+	// ---  ATTACHMENT ---
 	gum_interceptor_begin_transaction(interceptor);
 	
-	// Function Replacement Mode (bare-metal function replacement)
+	// Function Replacement Mode
 	gum_interceptor_replace(interceptor, target_func, (gpointer)HookedFunc, NULL, (gpointer*)&TrueFunc);
-	
+	// OR 
 	gum_interceptor_replace_fast(...)
 	
 	// OR Invocation Listener Mode 
@@ -443,21 +462,16 @@ If this thread's \ac{IP} is detected within the address range of the code being 
 
 	gum_interceptor_end_transaction(interceptor);
 
-	for (HANDLE h : threads) { ResumeThread(h); CloseHandle(h); }
-
-	// --- SAFE DETACHMENT ---
-
+	// ---  DETACHMENT ---
 	gum_interceptor_begin_transaction(interceptor);
 	
-	// Function Replacement Mode
+	// Revert target prologue bytes
 	gum_interceptor_revert(interceptor, target_func);
 	
 	// OR Invocation Listener Mode
 	// gum_interceptor_detach(interceptor, listener);
 
 	gum_interceptor_end_transaction(interceptor);
-
-	for (HANDLE h : threads) { ResumeThread(h); CloseHandle(h); }
 \end{lstlisting}
 
 \subsection{Thread-Safe Ejection}
@@ -521,11 +535,13 @@ To conclude the discussion on inline hooking, \cref{tab:inline_frameworks_compar
 		\midrule
 		\textbf{CPU State Preservation} & Manual & Manual & Automatic (\texttt{listener}) / Manual (\texttt{replace}) \\
 		\addlinespace
-		\textbf{Hook Orchestration} & Passive & Passive & Active (\texttt{listener}) /  Hybrid (\texttt{replace}) \\
+		\textbf{Hook Dispatch} & Passive & Passive & Active (\texttt{listener}) /  Hybrid (\texttt{replace}) \\
 		\addlinespace
 		\textbf{ABI Constraints} & Strict & Strict & Abstracted (\texttt{listener}) / Strict (\texttt{replace}) \\
 		\addlinespace
 		\textbf{Disassembler} & Proprietary LDE & HDE32 / HDE64 & Capstone (full semantic decoder) \\
+		\addlinespace
+		\textbf{Patching Concurrency} & Stop-the-World (explicit thread enlistment \& \ac{IP} relocation) & Stop-the-World (automated thread suspension \& \ac{IP} relocation) & Non-blocking batching (atomic instruction writes, no thread enlistment) \\
 		\addlinespace
 		\textbf{Architectures} & x86, x64 & x86, x64 & x86, x64, ARM, ARM64, MIPS \\
 		\bottomrule
@@ -534,21 +550,22 @@ To conclude the discussion on inline hooking, \cref{tab:inline_frameworks_compar
 	\label{tab:inline_frameworks_comparison}
 \end{table}
 
-\section{Dynamic Binary Instrumentation (DBI) Architectures}
+\section{Code-Cache-Based DBI Architectures}
+\label{sec:code_cache_dbi}
 
-For deeper execution analysis at the assembly level, \ac{DBI} engines are utilized.
-Unlike inline hooking, which patches the original binary in place, \ac{DBI} engines ensure that the target application's original code is never executed directly by the CPU.
+For deeper execution analysis at the assembly level, code-cache-based \ac{DBI} engines are utilized.
+Unlike inline hooking, which patches the original binary in place, code-cache-based \ac{DBI} engines ensure that the target application's original code is never executed directly by the CPU.
 Instead, the framework employs a \emph{Just-In-Time (JIT) compilation} mechanism to dynamically translate and instrument instruction sequences.
 \subsection{Core Architectural Components}
-Modern \ac{DBI} frameworks rely on a unified architectural pattern comprising the following components:
+Modern code-cache-based \ac{DBI} frameworks rely on a unified architectural pattern comprising the following components:
 
 \begin{description}
-	\item[1. The Dispatcher (Control Flow Manager):] The dispatcher is the central component of the \ac{DBI} engine, responsible for orchestrating the execution state.
-	Because the application and the \ac{DBI} framework share the same process but operate under different scopes, they must safely transit between ``framework mode'' and ``application mode''.
+	\item[1. The Dispatcher (Control Flow Manager):] The dispatcher is the central component of the code-cache \ac{DBI} engine, responsible for orchestrating the execution state.
+	Because the application and the code-cache \ac{DBI} framework share the same process but operate under different scopes, they must safely transit between ``framework mode'' and ``application mode''.
 	The dispatcher triggers a context-switch mechanism that carefully saves and restores the application's state whenever execution exits or enters the code cache.
 	\item[2. \ac{JIT} Compiler:] Instead of translating the entire binary before execution, these architectures translate the application's instructions dynamically in small fragments.
 	During this translation phase, the framework decodes and encodes (into the framework's abstraction) the original instructions and has the opportunity to insert custom instrumentation code or patches before emitting the new sequence.
-	\item[3. The Code Cache (The Execution Sandbox):] To mitigate the massive performance penalty of repeatedly translating the same code, \ac{DBI} frameworks employ a software-based code cache.
+	\item[3. The Code Cache (The Execution Sandbox):] To mitigate the massive performance penalty of repeatedly translating the same code, code-cache-based \ac{DBI} frameworks employ a software-based code cache.
 	The translated and potentially instrumented fragments are stored in this sandboxed memory region.
 	When the application re-executes a previously translated section of code, it runs directly from the code cache, which significantly optimizes execution speed.
 	\item[4. The Client Interface (Instrumentation API):] This is the abstraction layer exposed to the developer.
@@ -560,13 +577,13 @@ To formally describe how these components interact at runtime, we can outline th
 
 \begin{enumerate}
 	\item \emph{Interception:} The target application attempts to execute a block of original code.
-	The \ac{DBI} engine intercepts this attempt and yields control to the Dispatcher.
+	The code-cache \ac{DBI} engine intercepts this attempt and yields control to the Dispatcher.
 	\item \emph{Cache Lookup:} The Dispatcher queries a fast-lookup hash table to check if the target memory address has already been translated.
 	If it results in a cache hit, the CPU is redirected to the Code Cache.
 	\item \emph{Translation (On Cache Miss):} If the code has not been encountered before, the \ac{JIT} Compiler decodes original binary instructions one by one to form a straight-line sequence that terminates at a control transfer, such as a branch, call, or return.
 	\item \emph{Instrumentation:} The engine queries the Client Interface to determine if the user wishes to instrument the block or a single instruction within it.
 	If so, the instrumentation instructions are injected. 
-	\item \emph{Emission and Linking:} Most \ac{DBI} frameworks use this phase to apply patches to the control-flow instructions at the end of the sequence, guaranteeing that when the block finishes running, it will redirect back to the framework rather than jumping to a native memory address.
+	\item \emph{Emission and Linking:} Most code-cache-based \ac{DBI} frameworks use this phase to apply patches to the control-flow instructions at the end of the sequence, guaranteeing that when the block finishes running, it will redirect back to the framework rather than jumping to a native memory address.
 	If the block ends in a direct branch to another previously translated block, the engine ``links'' them together directly in the cache (if it was an indirect branch, it cannot know the target before executing it), allowing the CPU to bypass the Dispatcher in future iterations.
 	The modified block is emitted into the Code Cache.
 	\item \emph{Execution:} The Dispatcher performs a context switch, restoring the application state, and commands the CPU to execute the newly cached block natively.
@@ -578,20 +595,20 @@ To formally describe how these components interact at runtime, we can outline th
 \begin{figure}[H]
 	\centering
 	\includegraphics[width=0.9\textwidth]{images/DBI_flow.png}
-	\caption{The Execution Lifecycle of a DBI framework}
+	\caption{The Execution Lifecycle of a Code-Cache-Based DBI framework}
 	\label{fig:dbi_flow}
 \end{figure}
 
-While \ac{DBI} frameworks allow a more granular analysis of the target code, they introduce \emph{significantly higher overhead} compared to inline hooking.
+While code-cache-based \ac{DBI} frameworks allow a more granular analysis of the target code, they introduce \emph{significantly higher overhead} compared to inline hooking.
 Every single instruction of the program needs to be \ac{JIT}-compiled before execution, even if no instrumentation is injected.
 \subsection{The Client Interface: Instrumentation vs. Analysis Functions}
 
-\ac{DBI} frameworks require the developer to interact with the engine using a \emph{two-tiered callback paradigm}.
+Code-cache-based \ac{DBI} frameworks require the developer to interact with the engine using a \emph{two-tiered callback paradigm}.
 The developer must supply two distinct types of functions to the engine, each operating at fundamentally different times during the execution lifecycle:
 
 \begin{itemize}
 	\item \emph{The Instrumentation Function (The ``Where'' and ``What''):} 
-	This callback is invoked by the \ac{DBI} engine \emph{only once} per newly discovered sequence of instructions during the \ac{JIT} compilation phase.
+	This callback is invoked by the code-cache \ac{DBI} engine \emph{only once} per newly discovered sequence of instructions during the \ac{JIT} compilation phase.
 	Its purpose is to inspect the static properties of the instructions (e.g., opcodes, operands) and decide \emph{if} and \emph{where} custom code should be injected.
 	If injection is required, it uses the \ac{API} to queue the insertion of the analysis function.
 	\item \emph{The Analysis Function (The ``Action''):} 
@@ -602,7 +619,7 @@ The developer must supply two distinct types of functions to the engine, each op
 
 The level of abstraction provided by the Client Interface significantly alters how developers interact with the engine.
 \subsection{High-Level Abstraction API: Intel PIN}
-Intel PIN is a standard academic \ac{DBI} framework with a proprietary (free for non-commercial use) license.
+Intel PIN~\cite{DBLP:conf/pldi/LukCMPKLWRH05} is a standard academic code-cache-based \ac{DBI} framework with a proprietary (free for non-commercial use) license.
 It provides a heavily abstracted C++ \ac{API}.
 
 To utilize Intel PIN, developers do not modify the core engine itself.
@@ -612,7 +629,7 @@ it is the user-defined module that contains both the Instrumentation Functions a
 Architecturally, a PINtool is compiled as a standard shared library (a \ac{DLL} on Windows).
 When the user launches a target application under PIN, the engine automatically injects the PINtool \ac{DLL} into the target process's memory space.
 Once loaded, the engine invokes the PINtool's \texttt{main} function, allowing the tool to register its specific callbacks.
-In \cref{lst:pin_branch}, we can observe the granularity achievable using \ac{DBI}: in this case, we can log conditional branches to determine which paths are taken during code execution.
+In \cref{lst:pin_branch}, we can observe the granularity achievable using code-cache-based \ac{DBI}: in this case, we can log conditional branches to determine which paths are taken during code execution.
 
 
 \begin{lstlisting}[language=C++, caption={An example of a PINtool for branch logging}, label={lst:pin_branch}, basicstyle=\ttfamily\footnotesize, breaklines=true]
@@ -643,8 +660,8 @@ In \cref{lst:pin_branch}, we can observe the granularity achievable using \ac{DB
 	}
 \end{lstlisting}
 
-\subsection{Bare-Metal API: DynamoRIO}
-DynamoRIO is the open-source alternative that exposes a lower-level C \ac{API}.
+\subsection{low-level API: DynamoRIO}
+DynamoRIO~\cite{DBLP:conf/cgo/BrueningGA03} is the open-source alternative that exposes a lower-level C \ac{API}.
 The equivalent branch-logging example seen previously for PIN is implemented in \cref{lst:dr_branch}.
 
 \begin{lstlisting}[language=C, caption={DynamoRIO branch instrumentation example}, label={lst:dr_branch}, basicstyle=\ttfamily\footnotesize, breaklines=true]
@@ -694,8 +711,8 @@ state and flags manually for specialized analysis.
 
 In conclusion, while DynamoRIO may present a steeper learning curve than Intel PIN, it affords developers greater transparency and raw power, providing fine-grained control over the translated code and the code cache.
 
-\subsection{Summary of DBI Frameworks}
-To summarize the key differences between the analyzed DBI engines, \cref{tab:dbi_frameworks_comparison} compares the features and capabilities of Intel PIN and DynamoRIO.
+\subsection{Summary of Code-Cache-Based DBI Frameworks}
+To summarize the key differences between the analyzed code-cache-based \ac{DBI} engines, \cref{tab:dbi_frameworks_comparison} compares the features and capabilities of Intel PIN and DynamoRIO.
 
 \begin{table}[H]
 	\centering
@@ -715,21 +732,21 @@ To summarize the key differences between the analyzed DBI engines, \cref{tab:dbi
 		\textbf{License} & Proprietary (Free for non-commercial use) & BSD (Open Source) \\
 		\bottomrule
 	\end{tabular}
-	\caption{Comparison of the analyzed DBI frameworks.}
+	\caption{Comparison of the analyzed code-cache-based DBI frameworks.}
 	\label{tab:dbi_frameworks_comparison}
 \end{table}
 
 \section{Comparison of Approaches}
 \label{sec:comparison_approaches}
 
-To conclude the overview of the binary instrumentation ecosystem, this section provides a high-level comparison of the two paradigms discussed in this chapter: Inline Hooking and Dynamic Binary Instrumentation. \Cref{tab:paradigm_comparison} highlights the fundamental differences between these two methodologies.
+To conclude the overview of the \ac{DBI} ecosystem, this section provides a high-level comparison of the two paradigms discussed in this chapter: Inline Hooking and Code-Cache-Based \ac{DBI}. \Cref{tab:paradigm_comparison} highlights the fundamental differences between these two methodologies.
 
 \begin{table}[H]
 	\centering
 	\small
 	\begin{tabular}{p{3.5cm}p{4.8cm}p{4.8cm}}
 		\toprule
-		\textbf{Dimension} & \textbf{Inline API Hooking} & \textbf{Dynamic Binary Instrumentation (DBI)} \\
+		\textbf{Dimension} & \textbf{Inline API Hooking} & \textbf{Code-Cache-Based DBI} \\
 		\midrule
 		\textbf{Basic Mechanism} & Overwrites instructions in-place (e.g., using a \texttt{JMP} in the prologue). & Translates and executes instructions in a sandboxed Code Cache via JIT compilation \\
 		\addlinespace
@@ -744,7 +761,7 @@ To conclude the overview of the binary instrumentation ecosystem, this section p
 		\textbf{Complexity} & Low to Moderate (relies on basic disassembler length check and prologue displacement). & High (requires a full JIT compiler, control flow manager, and basic block linker). \\
 		\bottomrule
 	\end{tabular}
-	\caption{Comparison of the two main binary instrumentation paradigms.}
+	\caption{Comparison of the two main DBI paradigms.}
 	\label{tab:paradigm_comparison}
 \end{table}
 
@@ -759,7 +776,7 @@ The experimental activity was structured into three different scenarios, each de
 \label{subsec:scenario_1}
 
 \begin{itemize}
-	\item \textbf{Test Rationale:} This preliminary scenario aimed to verify the fundamental lifecycle management of binary instrumentation within the Windows ecosystem. 
+	\item \textbf{Test Rationale:} This preliminary scenario aimed to verify the fundamental lifecycle management of \ac{DBI} within the Windows ecosystem. 
 	
 	This involved implementing a custom, dual-mode utility (\texttt{injector.cpp}) to handle both the insertion and the ejection of the instrumentation payload. 
 	
@@ -769,7 +786,7 @@ The experimental activity was structured into three different scenarios, each de
 	
 	Furthermore, forcing the programmatic module ejection successfully triggered the \texttt{DLL\_PROCESS\_DETACH} branch within each hook's entry point, safely restoring the original prologue instruction bytes and confirming a flawless ejection in single-threaded environments.
 	
-	\item \textbf{Encountered Obstacles:} In this idealized single-threaded scenario, no big challenges occurred. Setting up Microsoft Detours was straightforward due to its thoroughly documented APIs, the abundance of reference examples, and a bare-metal paradigm that is conceptually simpler than that of Frida-Gum. 
+	\item \textbf{Encountered Obstacles:} In this idealized single-threaded scenario, no big challenges occurred. Setting up Microsoft Detours was straightforward due to its thoroughly documented APIs, the abundance of reference examples, and a standard paradigm that is conceptually simpler than that of Frida-Gum. 
 	
 	MinHook demonstrated a similar workflow to Detours but simplified the implementation further by automatically managing transactional patching internally. 
 	
@@ -794,15 +811,15 @@ The experimental activity was structured into three different scenarios, each de
 
 \end{itemize}
 
-\subsection{Scenario 3: Instruction-Level Assembly Tracking via DBI Engines}
+\subsection{Scenario 3: Instruction-Level Assembly Tracking via Code-Cache-Based DBI Engines}
 \label{subsec:scenario_3}
 
 \begin{itemize}
 	\item \textbf{Test Rationale:} To achieve low-level instruction granularity, a target program containing conditional branches was compiled (\texttt{PIN\_\allowbreak dynamo\_\allowbreak target.cpp}), alongside an Intel PIN tool (\texttt{pintool.cpp}) and a DynamoRIO client (\texttt{dynamo.c}). The rationale was to program the underlying JIT compilers to isolate all conditional branch instructions (\texttt{INS\_IsBranch} / \texttt{instr\_is\_cbr}) and dynamically inject an analysis callback (\texttt{record\_branch}) used to log the target address (taken branch).
 	
-	\item \textbf{Empirical Results:} Both \ac{DBI} engines yielded execution trace graphs. Using IntelPIN it was also possible to write the source file code line number correspondent to the taken branch
+	\item \textbf{Empirical Results:} Both code-cache-based \ac{DBI} engines yielded execution trace graphs. Using IntelPIN it was also possible to write the source file code line number correspondent to the taken branch
 	
-	\item \textbf{Encountered Obstacles:} An initial operational challenge involved navigating the different APIs of the two frameworks; DynamoRIO exposes lower-level, bare-metal utilities compared to the highly abstracted API of Intel PIN, resulting in a steeper learning curve. Beyond API familiarity, the primary technical obstacle across both engines was attempting to log not only the target runtime address of each taken branch but also its source code line number from \texttt{PIN\_dynamo\_target.cpp} (compiled with debug symbols) to maximize execution trace readability.
+	\item \textbf{Encountered Obstacles:} An initial operational challenge involved navigating the different APIs of the two frameworks; DynamoRIO exposes lower-level, low-level utilities compared to the highly abstracted API of Intel PIN, resulting in a steeper learning curve. Beyond API familiarity, the primary technical obstacle across both engines was attempting to log not only the target runtime address of each taken branch but also its source code line number from \texttt{PIN\_dynamo\_target.cpp} (compiled with debug symbols) to maximize execution trace readability.
 	
 	\item \textbf{Implemented Mitigations:} After several unsuccessful attempts, I have found that for solving the source line number obstacle under Intel Pin, I had to utilize the \texttt{PIN\_GetSourceLocation} API. However, direct invocation of this routine inside the analysis function triggers a critical runtime error due to missing client locks. To mitigate this, calls to \texttt{PIN\_GetSourceLocation} were wrapped inside a thread-safe synchronization pair using \texttt{PIN\_LockClient()} and \texttt{PIN\_UnlockClient()}, ensuring proper access to Pin's symbol database.
 \end{itemize}

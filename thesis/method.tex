@@ -1,7 +1,8 @@
+% !TeX root = main.tex
 \chapter{Methodology}
 \label{ch:method}
 
-This chapter presents the design, architecture, and implementation of HookDesigner: a declarative, multi-target transpilation and telemetry framework for Windows binary instrumentation.
+This chapter presents the design, architecture, and implementation of HookDesigner: a declarative, multi-target transpilation and telemetry framework for Windows \ac{DBI}.
 The chapter is structured as follows:
 \cref{sec:arch_overview} establishes the design principles, the overall architecture, and the target hooking engines.
 \cref{sec:policy_dsl} introduces the declarative policy specification.
@@ -19,8 +20,16 @@ However, handcrafting instrumentation code is notoriously error-prone due to the
 For this reason, subtle programming errors---such as dereferencing invalid parameters, or encountering race conditions in multi-threaded programs---inevitably result in unhandled crashes that terminate the entire host process.
 Moreover, managing the lifecycle of hooks, including safe runtime attachment/detachment, produces fragile, tightly coupled to a specific engine code that is difficult to audit and maintain under changing requirements.
 
-HookDesigner addresses this challenge through five foundational design principles.
+To overcome these limitations, HookDesigner introduces a novel paradigm in \ac{DBI}: \emph{declarative, multi-target transpilation}.
+In computer science, a \emph{transpiler} (or source-to-source compiler / code generator) is a program that translates an input specification or program authored in one high-level language into equivalent source code in another programming language.
+HookDesigner embodies this approach through a transpiler that automatically translates high-level, human-readable policy declarations directly into the corresponding engine-specific C++ code.
 
+HookDesigner targets the setting of \cref{ch:introduction}: Windows industrial processes for which source code is unavailable and the process cannot be restarted at will, the deployment host is often restricted (no compiler, interpreter or installer), the application is multi-threaded and latency-sensitive, and a crash of the instrumented process is unacceptable.
+
+\emph{Trust model:} Policy authors are trusted: DSL expressions are compiled into the payload, which runs with the privileges of the target.
+\cref{subsec:design_principles} derives the design principles from these requirements and records, for each, the alternative that was considered.
+
+HookDesigner addresses this challenge through five foundational design principles.
 \subsection{Design Principles}
 \label{subsec:design_principles}
 
@@ -35,7 +44,7 @@ HookDesigner addresses this challenge through five foundational design principle
 	\item \textbf{Crash Safety}
 	As analyzed in \cref{subsec:address_space_isolation}, the instrumentation payload is mapped directly into the target application's private virtual address space.
 	Consequently, any runtime error or unhandled memory access violation in the hook payload will crash the entire host process.
-	HookDesigner enforces zero-crash safety through automated fault isolation, generating safe memory-access primitives around all parameter reads, pointer dereferences, and wrapping user callback executions and telemetry code in exception handlers.
+	HookDesigner enforces crash safety through automated fault isolation, generating safe memory-access primitives around all parameter reads, pointer dereferences, and wrapping user callback executions and telemetry code in exception handlers.
 	
 	\item \textbf{Thread Safety}
 	Hooking a running, multi-threaded process introduces synchronization issues during both hook installation/removal and module ejection (as analyzed in \cref{subsec:ejection_sync}).
@@ -43,7 +52,7 @@ HookDesigner addresses this challenge through five foundational design principle
 	
 	\item \textbf{High-Performance Telemetry}
 	To provide observability without damaging application responsiveness, the telemetry must introduce minimal overhead on critical execution paths.
-	HookDesigner integrates industry-standard tools for high-performance telemetry, combining asynchronous logging via \texttt{spdlog} with lightweight metric exposition through \texttt{Prometheus}.
+	HookDesigner integrates industry-standard tools for high-performance telemetry, combining asynchronous logging via \texttt{spdlog}~\cite{repo:spdlog} with lightweight metric exposition through \texttt{Prometheus}~\cite{website:prometheus,repo:prometheus-cpp}.
 	This allows payloads to collect logs and real-time performance data with negligible latency impact on the host application.
 	
 	\item \textbf{Separation of Policy from Code}
@@ -67,7 +76,7 @@ The pipeline is split into two execution contexts: an \emph{offline} context exe
 	The transpiler parses the YAML policy and validates its structural and semantic integrity against the schema, verifying consistency and cross-referencing declarations with data in the C++ logic file.
 	
 	\item \textbf{Stage~3 -- Generate:}
-	The validated policy data are passed to the code generation engine. Using modular templates, the transpiler generatess complete, self-contained C++ source code tailored to the requested hooking engine.
+	The validated policy data are passed to the code generation engine. Using modular templates, the transpiler generates complete, self-contained C++ source code tailored to the requested hooking engine.
 	
 	\item \textbf{Stage~4 -- Compile:}
 	The generated C++ source files are compiled into Windows \acp{DLL}. The build process statically links the chosen instrumentation engine and telemetry backends, producing self-contained binaries without external runtime dependencies.
@@ -82,10 +91,10 @@ The pipeline is split into two execution contexts: an \emph{offline} context exe
 	When instrumentation terminates, the injector initiates a safe detachment procedure. Hook modifications are atomically reverted, and module unloading is coordinated with in-flight thread tracking to prevent process crashes.
 \end{itemize}
 
-A key consequence of the split into two execution contexts is that the online stages require no Python runtime, no \ac{LLVM}/LIBCLANG installation, and no access to the policy source---only the compiled \ac{DLL} and the injector binary are needed on the deployment host.
-This is especially relevant for SCADA environments, where the target host is typically a resource-constrained, or sandboxed system that lacks developer runtimes and on which installing external dependencies or interpreters is usually blocked.
+A key consequence of the split into two execution contexts is that the online stages require no Python runtime, LLVM/LIBCLANG installation, and no access to the policy source---only the compiled \ac{DLL} and the injector binary are needed on the deployment host.
+This is especially relevant for industrial environments, where the target host is typically a restricted system that lacks developer runtimes and on which installing external dependencies or interpreters is often blocked.
 
-\subsection{HookDesigner Architecture}
+\subsection{The HookDesigner Architecture}
 \label{subsec:component_mapping}
 
 To link the presented pipeline to the codebase, \cref{tab:component_mapping} maps each component of HookDesigner to its corresponding source files and responsibilities.
@@ -118,19 +127,19 @@ To link the presented pipeline to the codebase, \cref{tab:component_mapping} map
 
 The architectural analysis and experimental results presented in \fullref{ch:background} directly guided the choice of instrumentation engines supported by HookDesigner.
 
-For simplicity, I decided to start making HookDesigner compatible only with inline hooking paradigm (\cref{sec:inline_hooking}).
+Currently, HookDesigner is only compatible with inline hooking paradigm (\cref{sec:inline_hooking}).
 
 \begin{itemize}
 	\item \textbf{Microsoft Detours:}
-	Microsoft Detours was selected because, despite its minimalistic bare-metal model (analyzed in \cref{subsec:bare_metal_hooking}), it represents the gold standard for binary instrumentation in Windows x86 and x64 environments.
+	Microsoft Detours was selected because, despite its minimalistic model (analyzed in \cref{subsec:bare_metal_hooking}), it represents the gold standard for \ac{DBI} in Windows x86 and x64 environments.
 	By delegating execution routing directly to the detour function without intermediate layers (as illustrated in \cref{fig:Det}), Detours achieves near-zero runtime overhead, prioritizing execution speed over framework complexity. 
 	
 	\item \textbf{Frida-Gum:}
-	Frida-Gum was chosen as a complementary engine to provide cross-architecture support and modern dynamic interception capabilities.
-	However, as observed in \cref{subsec:scenario_2}, Frida-Gum's high-level \emph{Invocation Listener} mode introduces an \ac{ABI} limitation under the Windows x64 calling convention: its argument extraction \acp{API} index exclusively into General-Purpose Registers (\texttt{RCX}, \texttt{RDX}, \texttt{R8}, \texttt{R9}), failing to access floating-point parameters passed in vector registers (\texttt{XMM0}--\texttt{XMM3}).
-	To bypass this constraint, HookDesigner targets only Frida-Gum's \emph{Function Replacement} mode (\texttt{gum\_interceptor\_replace} and \texttt{gum\_interceptor\_replace\_fast}, presented in \cref{subsec:frida_arch}).
-	This allows developers to manually handle floating-point parameter extraction bypassing Frida indexing, while retaining some of Frida's built-in capabilities not included in Detours \ac{API}.
+	Frida-Gum was chosen as a complementary engine to provide modern dynamic interception capabilities.
+	Only Function Replacement mode is used, because the Invocation Listener cannot read floating-point arguments on Windows x64 (\cref{subsec:frida_arch,subsec:scenario_2}).
+	This allows developers to manually handle floating-point parameter extraction bypassing Frida indexing, while retaining some of Frida's features not included in Detours/MinHook (presented in \cref{subsubsec:advantages}).
 \end{itemize}
+[MinHook was not chosen because its execution model matches Detours]
 
 \section{Declarative Policy Specification and Logic File Integration}
 \label{sec:policy_dsl}
@@ -208,7 +217,7 @@ The \texttt{hooks} section defines a sequence of hook configuration objects. Eac
 		\item \emph{Offset Strategy} (\texttt{strategy:}\allowbreak\ \texttt{offset}): For unexported functions, HookDesigner computes its address at runtime by adding the specified hexadecimal \ac{RVA} offset (\texttt{rva\_offset}) to the base address of the specified \texttt{module}.
 	\end{itemize}
 	
-	\item \textbf{Non-Returning Functions (\texttt{is\_noreturn}):} this flag is automatically inferred for standard non-returning \acp{API} (such as \texttt{RaiseException}, \texttt{ExitProcess}, and \texttt{ExitThread}). Because these functions never return to the caller, the transpiler leverages this flag either during semantic validation to prevent policy authors from defining post-trampoline callbacks or non-compatible telemetry features (\cref{subsec:static_semantic_validation}) and for correctly selecting the hook function structure designed for non-returning functions \cref{subsec:noreturn_adaptation}.
+	\item \textbf{Non-Returning Functions (\texttt{is\_noreturn}):} this flag is automatically inferred for standard non-returning \acp{API} (such as \texttt{RaiseException}, \texttt{ExitProcess}, and \texttt{ExitThread}). Because these functions never return to the caller, the transpiler leverages this flag during semantic validation to prevent policy authors from defining post-trampoline callbacks, non-compatible telemetry options (\cref{subsec:static_semantic_validation}) and for correctly selecting the hook function structure designed for non-returning functions \cref{subsec:noreturn_adaptation}.
 	\item \textbf{Security\_policy}: is a dictionary containing the user-defined \texttt{pre\_hook} name (executed prior to the trampoline) and \texttt{post\_hook} name (executed after original function completes) of the callbacks implemented in the C++ logic file.
 \end{itemize}
 
@@ -233,7 +242,7 @@ The logic file will be included directly via \texttt{\#include} in the transpile
 \label{subsec:libclang_ast}
 
 Parsing C++ function declarations using naive regular expressions is notoriously fragile due to complex types, pointer nesting, and calling conventions.
-To guarantee correctness, Stage~2 of HookDesigner integrates CLANG via its Python bindings (\texttt{clang.cindex}).
+To guarantee correctness, Stage~2 of HookDesigner integrates Clang via its Python bindings (\texttt{clang.cindex})~\cite{tool:clang}.
 
 The transpiler uses CLANG creates an in-memory Abstract Syntax Tree correspondent to the logic file with \texttt{-std=c++17} standard and traverses its nodes for performing the following task:
 
@@ -246,24 +255,24 @@ The transpiler uses CLANG creates an in-memory Abstract Syntax Tree corresponden
 		\item The \emph{parameter list}, capturing parameter names and Clang type handles (\texttt{\_clang\_type}).
 	\end{itemize}
 	\item \textbf{Extracting Callback Parameters:}
-	The transpiler scans for \texttt{// @<CallbackName>-}\allowbreak\texttt{start} tag patterns and filters the AST for matching \texttt{FUNCTION\_DECL} nodes, extracting parameter name for cross-validation against target function prototypes.
+	The transpiler scans for \texttt{// @<CallbackName>-}\allowbreak\texttt{start} tag patterns and filters the \texttt{FUNCTION\_DECL} nodes, extracting parameter name for cross-validation against target function prototypes.
 \end{enumerate}
 
 During the parse and validation stage, the transpiler enforces the following semantic constraints:
-\begin{itemize}
+\begin{enumerate}
 	\item \textbf{Signature Bindings:} Every \texttt{function\_name} specified in the YAML policy must have a corresponding function declaration inside the Signatures Block.
 	\item \textbf{Callback Resolution:} Every callback identifier declared under \texttt{security\_policy} (\texttt{pre\_hook} - \texttt{post\_hook}) must have a matching \texttt{// @<CallbackName>-start} implementation in the logic file.
 	\item \textbf{Parameter Matching:} Each callback parameter must match the name of a parameter in the target function's signature. Type checking and reference binding to the C++ compiler, since we could have arguments passed as reference or type aliases.
 	\item \textbf{Return Value Overriding:} For \texttt{post\_hook} callbacks attached to non-void functions, an optional reference parameter matching the return type can be declared, enabling the callback to inspect or override the value returned to the caller.
-\end{itemize}
+\end{enumerate}
 
 \subsubsection{Callback Reusability}
 \note{Advisor}{cyan}{Non so se mettere questa parte su Callback Reusability}
 
-In some cases, sharing a pre/post callback across multiple distinct target functions could be useful for saving times and avoiding code duplication.
+In some cases, sharing a pre/post callback across multiple distinct target functions could be useful for saving time and avoiding code duplication.
 Because HookDesigner binds callback arguments by matching parameter names against the target function's parameters (delegating type checking and reference binding to the C++ compiler), developers can achieve callback reusability through parameter name alignment.
 
-As illustrated in \cref{lst:reusability_example}, if two target routines (\texttt{UpdateSensorA} and \texttt{UpdateSensorB}) operate on a sensor reading under different parameter names, the developer unifies the parameter identifier to \texttt{val} in the \texttt{signatures} block. A single callback (\texttt{ChangeSensorValue}) can then be attached to both hooks in the YAML policy without duplicating logic.
+As illustrated in \cref{lst:reusability_example}, if two target routines (\texttt{UpdateSensorA} and \texttt{UpdateSensorB}) operate on a sensor reading under different parameter names, the developer unifies the parameter identifier to \texttt{val} in the \texttt{signatures} block. A single callback (\texttt{ChangeSensorValue}) can then be defined to inspect or mutate \texttt{val} across both functions.
 
 \begin{lstlisting}[language=C++, caption={C++ user logic file illustrating callback reusability.}, label={lst:reusability_example}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 	
@@ -281,38 +290,46 @@ As illustrated in \cref{lst:reusability_example}, if two target routines (\textt
 	}
 \end{lstlisting}
 
+Correspondingly, \cref{lst:reusability_yaml} demonstrates how the YAML policy attaches the unified \texttt{ChangeSensorValue} callback as a pre-hook to both hooks without duplicating logic:
+
+\begin{lstlisting}[language=yaml, caption={YAML policy snippet attaching a shared callback across multiple hooks.}, label={lst:reusability_yaml}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+- function_name: UpdateSensorA
+  behaviors: { security_policy: { pre_hook: ChangeSensorValue } }
+- function_name: UpdateSensorB
+  behaviors: { security_policy: { pre_hook: ChangeSensorValue } }
+\end{lstlisting}
+
+
+
 To summarize the integration between declarative policy configuration and callback definitions, \cref{lst:policy_example} presents a complete YAML policy targeting multiple engines, combining export lookup, \ac{RVA} offset resolution, and injected user defined callbacks.
 
-\begin{lstlisting}[language=SQL, caption={Example of core HookDesigner YAML policy}, label={lst:policy_example}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-	configure:
+\begin{lstlisting}[language=yaml, caption={Example of core HookDesigner YAML policy}, label={lst:policy_example}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+configure:
 	paradigm: inline_hook
-	engines:
-	- detours
-	- frida
+	engines: [detours, frida]
 	process: scada_engine.exe
 	logic_file: "policy_logic.cpp"
-	
-	hooks:
-	- function_name: QueuePut
-	module: module.dll
-	address_resolution:
-	strategy: export
-	security_policy:
-	pre_hook: QueuePut_pre
-	post_hook: QueuePut_post
-	
-	- function_name: UpdateSensor
-	module: scada_engine.exe
-	address_resolution:
-	strategy: offset
-	rva_offset: "0x1A30"
-	security_policy:
-	pre_hook: ChangeSensorValue
-	
-	- function_name: RaiseException
-	is_noreturn: true
-	address_resolution:
-	strategy: export
+
+hooks:
+  - function_name: QueuePut
+    module: module.dll
+    address_resolution: { strategy: export }
+    behaviors:
+      security_policy:
+        pre_hook: QueuePut_pre
+        post_hook: QueuePut_post
+
+  - function_name: UpdateSensor
+    module: scada_engine.exe
+    address_resolution: { strategy: offset, rva_offset: "0x1A30" }
+    behaviors:
+      security_policy:
+        pre_hook: ChangeSensorValue
+
+  - function_name: RaiseException
+    module: kernel32.dll
+    is_noreturn: true
+    address_resolution: { strategy: export }
 \end{lstlisting}
 
 The corresponding companion \texttt{logic\_file} (\texttt{policy\_logic.cpp}) is shown in \cref{lst:logic_example}. It illustrates the signature declarations block, tagged callback implementations with parameter mutation, and return value overriding.
@@ -365,75 +382,75 @@ Hard-coding engine-specific boilerplate into the transpiler would couple the tra
 
 To resolve this challenge, HookDesigner organizes code generation process through two different layers:
 \begin{enumerate}
-	\item An \textbf{external engine registry} (\texttt{engines.yaml}) that parameterises engine-specific template selection, cast expressions, and build arguments (\cref{subsec:engine_registry}).
-	\item A \textbf{modular template hierarchy} that factors shared instrumentation logic into engine-independent partial templates while delegating specific features to engine templates (\cref{subsec:template_composition}).
+	\item An \emph{external engine registry} (\texttt{engines.yaml}) that parameterises engine-specific template selection, cast expressions, and build arguments (\cref{subsec:engine_registry}).
+	\item A \emph{modular template hierarchy} that factors shared instrumentation logic into engine-independent partial templates while delegating specific features to engine templates (\cref{subsec:template_composition}).
 \end{enumerate}
 
 \subsection{Engine Registry}
 \label{subsec:engine_registry}
 
-The engine registry is a declarative YAML configuration file located at \texttt{engines.yaml} containing all engine-specific parameters.
-The transpiler loads this file at startup via \texttt{load\_engines()} and uses it to drive all subsequent template rendering and compilation decisions.
-With this registry, supporting a new hooking framework requires only providing an engine template and defining a registry entry; the Python parsing and validation remains unmodified.
+The \texttt{engines.yaml} registry is a declarative configuration file  that contains all engine-specific parameters and build requirements.
+The transpiler loads this registry at startup via \texttt{load\_engines()} and uses it to drive subsequent template rendering and compilation decisions.
+Crucially, the registry decouples the transpiler's core code generation logic from individual hooking backends: supporting an additional hooking engine requires only supplying its Jinja2 template and defining its parameters in \texttt{engines.yaml}, requiring zero modifications to the transpiler logic.
 
 \subsubsection{Registry Schema}
 
 Engine entries are organized under a \emph{paradigm} top-level key that groups engines by their hooking model (e.g., \texttt{inline\_hook}).
 This classification enables HookDesigner to support heterogeneous instrumentation paradigms (such as \ac{DBI} backends like DynamoRIO or Intel PIN, discussed in \cref{subsec:target_selection}).
-\cref{tab:engine_registry_schema} documents the five required configuration fields mandated for every engine operating under the \texttt{inline\_hook} paradigm.
+\cref{tab:engine_registry_schema} documents the configuration schema for engines operating under the \texttt{inline\_hook} paradigm, which mandates four core parameters alongside an optional list of auxiliary system libraries.
 
 \begin{table}[H]
 	\centering
 	\small
-	\begin{tabular}{@{}p{2.8cm}p{2.8cm}p{8.0cm}@{}}
+	\begin{tabularx}{\textwidth}{@{}llc>{\RaggedRight\arraybackslash}X@{}}
 		\toprule
-		\textbf{Field} & \textbf{Type} & \textbf{Architectural Role} \\
+		\textbf{Field} & \textbf{Type} & \textbf{Req.} & \textbf{Role / Description} \\
 		\midrule
-		\texttt{template}      & string         & Filename of the engine's root Jinja2 template located in the \texttt{templates/} directory (e.g., \texttt{detours\_template.cpp}) \\
+		\texttt{template}      & string               & Yes & Filename of the engine's root Jinja2 template located in \texttt{templates/} (e.g., \texttt{detours\_template.cpp}). \\
 		\addlinespace
-		\texttt{cast\_format}  & Python format string & Function-pointer cast expression. Captures engine-specific pointer typedef required. \\
+		\texttt{cast\_format}  & format string        & Yes & Python format string for function-pointer casting during dynamic symbol resolution (e.g., \texttt{"(True\{name\}\_t)"} or \texttt{"(gpointer)"}). \\
 		\addlinespace
-		\texttt{libs\_arg}     & string         & Name of the CLI argument through which the static library path for the engine is passed to the transpiler. \\
+		\texttt{include\_path} & string (path)        & Yes & Header include directory for the hooking engine; supports \texttt{\$\{VAR\}} environment variable expansion. \\
 		\addlinespace
-		\texttt{inc\_arg}      & string         & Name of the CLI argument designating the engine's C/C++ header include directory \\
+		\texttt{lib\_path}      & string (path)        & Yes & Static library (\texttt{.lib}) file path for the hooking engine; supports \texttt{\$\{VAR\}} environment variable expansion. \\
 		\addlinespace
-		\texttt{extra\_libs}   & list of strings & Additional Windows libraries statically linked into the generated \ac{DLL} \\
+		\texttt{extra\_libs}   & list of strings      & No  & Auxiliary Windows system libraries \\
 		\bottomrule
-	\end{tabular}
+	\end{tabularx}
 	\caption{Schema definition for engine entries registered in \texttt{engines.yaml}.}
 	\label{tab:engine_registry_schema}
 \end{table}
 
-\cref{lst:engines_yaml} lists the current registry configuration supporting Microsoft Detours and Frida-Gum.
+\cref{lst:engines_yaml} lists the registry configuration supporting Microsoft Detours and Frida-Gum.
 The \texttt{cast\_format} field illustrates how the registry handles low-level engine differences without introducing conditional branching into the template files.
 By encoding these conventions in \texttt{cast\_format}, the address resolution handler (\texttt{handle\_address\_resolution}, detailed in \cref{subsec:address_resolution}) emits the appropriate C++ cast expression directly in the transpilation process.
 
-\begin{lstlisting}[language=SQL, caption={Current \texttt{engines.yaml} registry definition for Detours and Frida-Gum.}, label={lst:engines_yaml}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-	inline_hook:
-	detours:
-	template: "detours_template.cpp"
-	cast_format: "(True{name}_t)"
-	libs_arg: "detours_lib"
-	inc_arg: "detours_include"
-	extra_libs:
-	- "User32.lib"
-	- "Advapi32.lib"
-	
-	frida:
-	template: "frida_template.cpp"
-	cast_format: "(gpointer)"
-	libs_arg: "frida_lib"
-	inc_arg: "frida_include"
-	extra_libs:
-	- "User32.lib"
-	- "Advapi32.lib"
-	- "Ole32.lib"
-	- "Shell32.lib"
+\begin{lstlisting}[language=yaml, mathescape=false, caption={Registry definitions for Detours and Frida-Gum in \texttt{engines.yaml}.}, label={lst:engines_yaml}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+inline_hook:
+  detours:
+    template: "detours_template.cpp"
+    cast_format: "(True{name}_t)"
+    include_path: "${DETOURS_INC}"
+    lib_path: "${DETOURS_LIB}"
+    extra_libs:
+      - "User32.lib"
+      - "Advapi32.lib"
+
+  frida:
+    template: "frida_template.cpp"
+    cast_format: "(gpointer)"
+    include_path: "${FRIDA_INC}"
+    lib_path: "${FRIDA_LIB}"
+    extra_libs:
+      - "User32.lib"
+      - "Advapi32.lib"
+      - "Ole32.lib"
+      - "Shell32.lib"
 \end{lstlisting}
 
 \subsubsection{Registry Loading and Multi-Engine Validation}
 
-The transpiler uses \texttt{load\_engines()} to parse \texttt{engines.yaml}, validating each entry against paradigm schemas: \texttt{inline\_hook} mandates all five fields in \cref{tab:engine_registry_schema}.
+The transpiler uses \texttt{load\_engines()} to parse \texttt{engines.yaml}, validating each entry against paradigm schemas: \texttt{inline\_hook} mandates the four required fields in \cref{tab:engine_registry_schema}.
 During policy validation (\texttt{validate\_policy}), the transpiler checks every declared engine (\texttt{configure.engines}) against the registry using \texttt{get\_engine\_config()} helper.
 If a policy specifies multiple engines (e.g., \texttt{engines: ["detours", "frida"]}), the transpiler checks that all selected engines belong to the identical paradigm.
 
@@ -442,7 +459,7 @@ This check prevents incoherent code generation scenarios, such as simultaneously
 \subsection{Jinja2 template architecture}
 \label{subsec:template_composition}
 
-HookDesigner generatess production-ready C++ instrumentation files through a modular Jinja2 template architecture.
+HookDesigner generates production-ready C++ instrumentation files through a modular Jinja2~\cite{repo:jinja2} template architecture.
 A naive approach to multi-target code generation would maintain monolithic, duplicated template files for each supported engine.
 However, with the framework we have selected, the majority of generated code is engine-independent.
 Duplicating these code across engines would introduce maintenance issues.
@@ -482,7 +499,7 @@ To maximize code reuse while preserving engine autonomy, in HookDesigner templat
 	\label{tab:partial_matrix}
 	\end{table}
 
-Unlike the standard \ac{DLL} pattern presented in \cref{subsec:address_space_isolation} (where hook attachment and detachment are performed within \texttt{DllMain}), HookDesigner intentionally moves payload activation and ejection into standalone exported functions.
+Unlike the standard \ac{DLL} pattern presented in \cref{subsec:dll_injection} (where hook attachment and detachment are performed within \texttt{DllMain}), HookDesigner intentionally moves payload activation and ejection into standalone exported functions.
 This separation is an architectural prerequisite to prevent Windows loader-lock deadlocks when installing complex hooks, as analyzed in \cref{subsec:lock_issue}.
 
 Crucially, the bodies of \texttt{InitializeHooks} and \texttt{DeinitializeHooks} cannot be shared across engines: as established in \cref{subsec:transactional_patching}, guaranteeing thread safety during hook attachment and detachment requires engine-specific transactional models (such as Microsoft Detours' thread-enlisted prologue rewriting vs. Frida-Gum's dynamic interceptor runtime).
@@ -535,7 +552,7 @@ HookDesigner generate two exported functions with standard C linkage: \texttt{In
 \label{subsec:trans_attach_detach}
 
 Once the target functions are located, the template performs batch hook registration using the engine's transactional API, building on the transactional patching principles established in \cref{subsec:transactional_patching}.
-Transactional execution guarantees atomicity: either all valid hooks are committed simultaneously, or the entire transaction fails without leaving the process in a partially patched, unstable state.
+Transactional execution combined with the engine-specific rollback mechanisms (\cref{lst:lifecycle_exception_rollback}) ensures atomicity: either all valid hooks are committed simultaneously, or the entire transaction fails without leaving the process in a partially patched, unstable state.
 
 Symmetrically, during payload deinitialization, an atomic detachment transaction reverts the patches and restores the original instructions.
 
@@ -543,78 +560,101 @@ Depending on the active hooking engine, the template emits the corresponding tra
 
 \begin{lstlisting}[language=C++, caption={Simplified Jinja2 template logic for Microsoft Detours hook lifecycle functions.}, label={lst:detours_lifecycle_template}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 
-extern "C" __declspec(dllexport) void InitializeHooks() {
-    // 1. Locate Functions
-    {% for hook in hooks %}
-    	True{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
-    {% endfor %}
+extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
+    try {
+        // Locate Functions
+        {% for hook in hooks %}
+        True{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
+        {% endfor %}
 
-    // 2. Transactional Attachment
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    {% for hook in hooks %}
-    if (True{{ hook.function_name }}) {
-        DetourAttach(&(PVOID&)True{{ hook.function_name }}, (PVOID)Hooked{{ hook.function_name }});
+        // Transactional Attachment...
+        
+
+        {% for hook in hooks %}
+        if (True{{ hook.function_name }}) {
+            DetourAttach(&(PVOID&)True{{ hook.function_name }}, (PVOID)Hooked{{ hook.function_name }});
+        }
+        {% endfor %}
+
+        //Transaction commit and thread cleanup...
+
+        
+    } catch (const std::exception& ex) {
+        //diagnostic and rollback mechanism...
     }
-    {% endfor %}
-    DetourTransactionCommit();
 }
 
-extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
-    // Transactional Detachment / Reversion
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    {% for hook in hooks %}
-    if (True{{ hook.function_name }}) {
-        DetourDetach(&(PVOID&)True{{ hook.function_name }}, (PVOID)Hooked{{ hook.function_name }});
+extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) {
+    try {
+            // Transactional Detachment...
+
+            {% for hook in hooks %}
+            if (True{{ hook.function_name }}) {
+                DetourDetach(&(PVOID&)True{{ hook.function_name }}, (PVOID)Hooked{{ hook.function_name }});
+            }
+            {% endfor %}
+
+            //Transaction commit and thread cleanup...
+        
+
+    } catch (const std::exception& ex) {
+        //diagnostic and rollback mechanism...
     }
-    {% endfor %}
-    DetourTransactionCommit();
-    
 }
 \end{lstlisting}
 
 \begin{lstlisting}[language=C++, caption={Simplified Jinja2 template logic for Frida-Gum hook lifecycle functions.}, label={lst:frida_lifecycle_template}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 
-extern "C" __declspec(dllexport) void InitializeHooks() {
-    gum_init_embedded();
-    interceptor = gum_interceptor_obtain();
+extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
+    try {
+        gum_init_embedded();
+        interceptor = gum_interceptor_obtain();
 
-    // 1. Locate Functions
-    {% for hook in hooks %}
-    	True{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
-    {% endfor %}
+        // Locate Functions
+        {% for hook in hooks %}
+        target_{{ hook.function_name }} = {{ hook.address_resolution_cpp }};
+        {% endfor %}
 
-    // 2. Transactional Replacement
-    gum_interceptor_begin_transaction(interceptor);
-    {% for hook in hooks %}
-    if (target_{{ hook.function_name }}) {
+        // Transactional Replacement...
+        gum_interceptor_begin_transaction(interceptor);
+        {% for hook in hooks %}
+        if (target_{{ hook.function_name }}) {
         gum_interceptor_replace(interceptor,
                                 target_{{ hook.function_name }},
                                 (gpointer)Hooked{{ hook.function_name }},
                                 nullptr,
                                 (gpointer*)&True{{ hook.function_name }});
+        }
+        {% endfor %}
+        gum_interceptor_end_transaction(interceptor);
+
+    } catch (const std::exception& ex) {
+        //diagnostic and rollback mechanism...
     }
-    {% endfor %}
-    gum_interceptor_end_transaction(interceptor);
 }
 
-extern "C" __declspec(dllexport) BOOL DeinitializeHooks() {
-    // Transactional Reversion
-    gum_interceptor_begin_transaction(interceptor);
-    {% for hook in hooks %}
-    if (target_{{ hook.function_name }} != nullptr) {
-        gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
-    }
-    {% endfor %}
-    gum_interceptor_end_transaction(interceptor);
+extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) {
+    try {
+			// Transactional Detachment...
+			gum_interceptor_begin_transaction(interceptor);
+			{% for hook in hooks %}
+			if (target_{{ hook.function_name }} != nullptr) {
+				gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+			}
+			{% endfor %}
+			gum_interceptor_end_transaction(interceptor);
 
-    return TRUE;
+			g_object_unref(interceptor);
+			gum_deinit_embedded();
+
+    } catch (const std::exception& ex) {
+        //logs and rollback mechanism
+    }
 }
 \end{lstlisting}
 
 While \cref{lst:detours_lifecycle_template,lst:frida_lifecycle_template} illustrate the simplified Jinja2 template loops used to generate batch attachment and detachment, deploying these routines into a live, multi-threaded process requires additional safeguards to coordinate thread synchronization, handle telemetry subsystems, and prevent loader-lock deadlocks.
-The complete runtime execution sequence of \texttt{InitializeHooks()} and \texttt{DeinitializeHooks()} is detailed in \cref{sec:injection_lifecycle}.
+The complete definition of \texttt{InitializeHooks()} and \texttt{DeinitializeHooks()} is detailed in \cref{sec:injection_lifecycle}.
 
 
 
@@ -644,7 +684,7 @@ To assemble the complete build command, \texttt{compile\_dll()} combines the com
 		\addlinespace
 		\texttt{/std:c++17}& Language Standard& Enables C++17 language constructs\\
 		\addlinespace
-		\texttt{/MT}       & CRT Linkage      & Statically links the C Runtime Library (\texttt{libcmt.lib}), completely eliminating external runtime dependencies on \texttt{msvcp140.dll}. \\
+		\texttt{rt-link}       & CRT Linkage      & \{/MT,/MD\}, default /MT. Statically/Dynamically links the C Runtime Library (\texttt{libcmt.lib}). \\
 		\bottomrule
 	\end{tabular}
 	\caption{MSVC compiler flags utilized in \texttt{compile\_dll()} and their behavior}
@@ -659,7 +699,7 @@ By enforcing static CRT linkage (\texttt{/MT}) and statically linking the hookin
 The resulting \ac{DLL} carries zero dependencies beyond core Windows system libraries, guaranteeing reliable injection into restricted industrial environments.
 
 
-\section{Telemetry in HookDesigner}
+\section{HookDesigner Telemetry}
 \label{sec:telemetry_engine}
 
 In industrial SCADA environment, critical functions frequently execute thousands of times per second across concurrent worker threads.
@@ -734,7 +774,7 @@ In Prometheus, labels (\cref{subsubsec:metric_labels}) allow a single metric fam
 		\textbf{Field} & \textbf{Type} & \textbf{Req.} & \textbf{Default} & \textbf{Description} \\
 		\midrule
 		\multicolumn{5}{@{}l}{\textit{\textbf{Performance Metrics Policy (\texttt{behaviors.performance\_metrics})}}} \\
-		\texttt{execution\_time} & bool & No & \texttt{false} & Enables \texttt{target\_function} latency measurement\\
+		\texttt{execution\_time} & bool & No & \texttt{false} & Enables \texttt{target\_function} \texttt{\_\_hook\_latency} measurement\\
 		\texttt{counters}        & list & No & \texttt{[]}    & Counter metric definitions \\
 		\texttt{gauges}          & list & No & \texttt{[]}    & Gauge metric definitions \\
 		\texttt{histograms}      & list & No & \texttt{[]}    & Histogram metric definitions \\
@@ -743,7 +783,7 @@ In Prometheus, labels (\cref{subsubsec:metric_labels}) allow a single metric fam
 		\texttt{name}            & string & Yes & --- & Unique metric identifier within the hook function. \\
 		\texttt{description}     & string & No  & \texttt{""} & Human-readable help string exported to the Prometheus registry. \\
 		\texttt{condition}       & string & No  & \texttt{"true"} & Boolean expression indicating when the observation occurs. \\
-		\texttt{value}           & string & Gauges/Hists & --- & C++ numerical expression to record (e.g., \texttt{latency}, parameter). \\
+		\texttt{value}           & string & Gauges/Hists & --- & C++ numerical expression to record (e.g., \texttt{\_\_hook\_latency}, parameter). \\
 		\texttt{buckets}         & list   & No (Hists) & \textit{default} & Custom strictly increasing positive bucket upper bounds only for histograms. \\
 		\texttt{label}           & dict   & No  & \texttt{\{\}} & Dynamic key-value label mapping for dimensional partitioning. \\
 		\midrule
@@ -762,7 +802,7 @@ In Prometheus, labels (\cref{subsubsec:metric_labels}) allow a single metric fam
 \subsubsection{Logging Rule Declaration Modalities}
 \label{subsubsec:log_rule_modalities}
 
-In binary instrumentation, logging formats can vary widely across different inspection environments.
+In \ac{DBI}, logging formats can vary widely across different inspection environments.
 During exploratory reverse engineering, an analyst often requires rapid, call-graph tracing log to understand execution control flow.
 Conversely, during an incident response, logs should be able to capture precise parameter states and outcome codes formatted to match external ingestion tools.
 
@@ -776,7 +816,7 @@ To reconcile these different requirements, HookDesigner supports different decla
 \end{enumerate}
 
 
-\begin{lstlisting}[language=SQL, caption={Demonstration of the logging rule declaration modalities}, label={lst:log_rule_modalities}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+\begin{lstlisting}[language=yaml, caption={Demonstration of the logging rule declaration modalities}, label={lst:log_rule_modalities}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 hooks:
   # Modality 1: Empty Rule
   - function_name: CreateFileW
@@ -834,7 +874,7 @@ hooks:
 
 \cref{lst:telemetry_policy_snippet} provides a YAML policy snippet demonstrating the integration of latency tracking, Prometheus counters and histograms with dynamic labels, and multi-condition log routing.
 
-\begin{lstlisting}[language=SQL, caption={Example YAML with telemetry configuration}, label={lst:telemetry_policy_snippet}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+\begin{lstlisting}[language=yaml, caption={Example YAML with telemetry configuration}, label={lst:telemetry_policy_snippet}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 configure:
   process: "scada_engine.exe"
   logic_file: "scada_logic.cpp"
@@ -865,7 +905,7 @@ hooks:
         histograms:
           - name: "processing_latency_ms"
             description: "Distribution of packet parsing latency"
-            value: "latency"
+            value: "__hook_latency"
             buckets: [0.05, 0.1, 0.5, 1.0, 5.0, 10.0]
             label:
               status: "__hook_result == 1 ? success : failure"
@@ -873,23 +913,54 @@ hooks:
         - name: "packet_failure"
           condition: "__hook_result != 1"
           level: "warn"
-          format: "[WARN] Packet parse failure | weight={input_complexityWeight} thread={tid} latency={latency:.2f}ms"
+          format: "[WARN] Packet parse failure | weight={input_complexityWeight} thread={__hook_tid} latency={__hook_latency:.2f}ms"
 \end{lstlisting}
 
 \subsection{Static Telemetry Expression Translation}
 \label{subsec:expr_translation}
 
-Inside a detour function, evaluating telemetry expressions---such as conditional triggers, custom format strings, and dynamic metric values---through runtime interpretation would introduce execution latency.
-To eliminate this overhead, HookDesigner employs \emph{static expression translation} across Stage~2 and Stage~3: the transpiler analyzes telemetry expressions ahead of time and translates them directly into native C++ instructions.
+Inside a detour function, evaluating telemetry expressions---such as conditional triggers, custom format strings, and dynamic metric values---through runtime interpretation would be inefficient.
+While conventional frameworks rely on embedded interpreters or runtime Abstract Syntax Tree evaluators---introducing C-structure marshaling costs, heap allocations, and garbage collection jitter per each hook invocation---HookDesigner adopts a \emph{static expression translation} approach across Stage~2 and Stage~3. The transpiler analyzes telemetry expressions ahead of time and translates them directly into native C++ instructions.
+The core translation and demand-driven parameter capture registration procedure is formalized in \cref{alg:translate_expr}.
 
-\subsubsection{Telemetry Wildcard}
+\begin{algorithm}[t]
+	\caption{Static telemetry expression translation (\texttt{translate\_telemetry\_expr})}
+	\label{alg:translate_expr}
+	\begin{algorithmic}[1]
+		\Require telemetry expression $e$, target hook metadata $h$
+		\Ensure translated C++ expression $e$, updated capture sets and tracking flags on $h$
+		\State replace every \texttt{\_\_hook\_tid} in $e$ with \texttt{GetCurrentThreadId()}
+		\If{\texttt{\_\_hook\_latency} occurs in $e$}
+			\If{$h$.\texttt{is\_noreturn}} 
+				\State \textbf{throw} \text{semantic error} 
+			\EndIf
+			\State mark $h$ as requiring execution-time tracking
+			\State replace \texttt{\_\_hook\_latency} with \texttt{elapsed\_ms\_<}$h$.\texttt{function\_name}\texttt{>}
+		\EndIf
+		\If{\texttt{\_\_hook\_result} occurs in $e$}
+			\If{$h$.\texttt{return\_type} is \texttt{void} \textbf{or} $h$.\texttt{is\_noreturn}} 
+				\State \textbf{throw} \text{semantic error} 
+			\EndIf
+		\EndIf
+		\For{each token \texttt{input\_<}p\texttt{>} or \texttt{output\_<}p\texttt{>} in $e$}
+			\If{$p \notin h$.\texttt{parameters} \textbf{or} (\text{token is } \texttt{output\_} \textbf{and} $h$.\texttt{is\_noreturn})}
+				\State \textbf{throw} \text{semantic error}
+			\EndIf
+			\State register $p$ in $h$.\texttt{input\_vars\_needed} (or $h$.\texttt{output\_vars\_needed})
+		\EndFor
+		\State \Return $e$
+	\end{algorithmic}
+\end{algorithm}
 
-The transpiler inspects \texttt{log\_rules} (conditions, custom formats, arguments) or \texttt{performance\_metrics} (metric conditions, gauge/histogram values, dynamic label expressions) using \texttt{translate\_telemetry\_expr()}, replacing domain-specific wildcards with their concrete C++ equivalents:
+\subsubsection{Telemetry Wildcards}
+
+As formalized in lines~2--9 of \cref{alg:translate_expr}, domain-specific wildcards in telemetry expressions are resolved directly into concrete C++ constructs:
 \begin{itemize}
-	\item \texttt{\_\_hook\_tid} $\longrightarrow$ \texttt{GetCurrentThreadId()}: Inserts a direct Win32 call querying the current thread's unique identifier.
-	\item \texttt{\_\_hook\_latency} $\longrightarrow$ \texttt{elapsed\_ms\_<FunctionName>}: Translates the latency wildcard into an elapsed millisecond variable. If referenced, the transpiler automatically forces \texttt{execution\_time = true} on the target hook.
-	\item \texttt{\_\_hook\_result} $\longrightarrow$ return value of non-void target functions.
+	\item \texttt{\_\_hook\_tid} (line~2) rewrites to a Win32 \texttt{GetCurrentThreadId()} call.
+	\item \texttt{\_\_hook\_latency} (lines~3--6) automatically forces execution time tracking on target hook $h$ and rewrites the symbol to \texttt{elapsed\_ms\_<FunctionName>}, statically rejecting non-returning routines.
+	\item \texttt{\_\_hook\_result} (lines~7--9) maps to the target routine's return value, rejecting functions that are \texttt{void} or non-returning.
 \end{itemize}
+
 
 \subsubsection{Parameter Capturing}
 \label{subsec:param_capture}
@@ -905,8 +976,8 @@ To provide correct visibility, HookDesigner establishes an explicit way for targ
 \end{itemize}
 
 Crucially, argument capturing is \emph{demand-driven}.
-The transpiler identifies precisely which parameters are referenced across the specified log rules and metric by scanning them with regular expressions (\texttt{\_VAR\_RE = \textbackslash b(input|output)\_([a-zA-Z0-9\_]+)\textbackslash b}), .
-If an argument is never referenced in telemetry, the transpiler emits zero capturing code for it, ensuring zero overhead for unused arguments.
+By scanning telemetry expressions with regular expressions (\texttt{\_VAR\_RE}), \cref{alg:translate_expr} (lines~10--14) identifies every referenced parameter, validates it against the formal signature of $h$ (rejecting post-invocation captures on non-returning routines), and registers it into the corresponding capture set (\texttt{input\_vars\_needed} or \texttt{output\_vars\_needed}).
+If an argument is never referenced in telemetry, no capture code is emitted for it.
 
 For every needed parameter, the transpiler invokes \texttt{analyze\_type()} on its Clang type handle (\texttt{\_clang\_type}, preserved from the signature extraction stage in \cref{subsec:libclang_ast}), to automatically generate the safe C++ code for saving the parameter's value according to its type, as detailed in \cref{subsec:safe_access}:
 \begin{itemize}
@@ -931,7 +1002,7 @@ Because HookDesigner's logging engine (\texttt{spdlog}, \cref{subsec:async_loggi
 As illustrated in \cref{fig:expr_translation_pipeline}, the transpiler scans the format string for tokens matching \texttt{\{placeholder[:specifier]\}}.
 For each detected token:
 \begin{enumerate}
-	\item The inner expression is resolved into a valid C++ expression and appended to the \texttt{fmt} argument list. If the token references an \texttt{input\_<param>} or \texttt{output\_<param>}, it is cross-referenced against the target routine's parameter list.
+	\item The inner expression is resolved into a native C++ expression via \cref{alg:translate_expr} and appended to the \texttt{fmt} argument list.
 	\item The entire token itself in the template string is rewritten into an empty or specifier positional token (e.g., \texttt{\{\}} or \texttt{\{:x\}}), generating a positional format string.
 \end{enumerate}
 
@@ -1008,50 +1079,42 @@ Format string parsing and argument type checking are executed entirely at C++ co
 Because telemetry frequently evaluates function outcome codes (\texttt{\_\_hook\_result}), elapsed execution latency, and mutated output buffers (\texttt{output\_}), HookDesigner positions the telemetry evaluation block (\texttt{\_telemetry\_body.cpp}) in the hook epilogue, immediately following the trampoline invocation.
 
 
-\cref{lst:generated_telemetry_cpp} demonstrates the C++ code generated by the transpiler from declarative telemetry rules:
+For a target routine \texttt{int ProcessCommandSignal(int cmdId, double* payloadValue, char* responseBuffer)}, \cref{lst:generated_telemetry_cpp} demonstrates the concrete C++ code generated by the transpiler inside \texttt{\_hook\_body.cpp} and \texttt{\_telemetry\_body.cpp} from declarative telemetry rules:
 
-\begin{lstlisting}[language=C++, caption={Generated C++ code inside \texttt{\_hook\_body.cpp} and \texttt{\_telemetry\_body.cpp} demonstrating demand-driven parameter capture and log rule evaluation.}, label={lst:generated_telemetry_cpp}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-// --- Entry Parameter Capturing  ---
-double input_payloadValue = {};
-std::string input_responseBuffer = {};
-try {
-    input_payloadValue = ReadPointer(payloadValue);
-    input_responseBuffer = CopyString(responseBuffer);
-    
-    ProcessCommandSignal_pre(payloadValue);
-} catch (...) {
-    OutputDebugStringA("[HOOK EXCEPTION] Exception in pre-hook\n");
-}
+\begin{lstlisting}[language=C++, caption={Generated C++ code inside \texttt{\_hook\_body.cpp} and \texttt{\_telemetry\_body.cpp} for \texttt{ProcessCommandSignal}, demonstrating demand-driven parameter capture}, label={lst:generated_telemetry_cpp}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+// Entry Parameter Capturing
+int input_cmdId = cmdId;
+double input_payloadValue = ReadPointer(payloadValue);
+std::string input_responseBuffer = CopyString(responseBuffer);
 
-LARGE_INTEGER start_time_ParseProprietaryPacket;
-QueryPerformanceCounter(&start_time_ParseProprietaryPacket);
+// Target function latency measurement
+LARGE_INTEGER start_time_ProcessCommandSignal;
+QueryPerformanceCounter(&start_time_ProcessCommandSignal);
 
-int __hook_result = TrueParseProprietaryPacket(packetBuffer, complexityWeight);
+int __hook_result = TrueProcessCommandSignal(cmdId, payloadValue, responseBuffer);
 
-LARGE_INTEGER end_time_ParseProprietaryPacket;
-QueryPerformanceCounter(&end_time_ParseProprietaryPacket);
-double elapsed_ms_ParseProprietaryPacket = (double)(end_time_ParseProprietaryPacket.QuadPart - start_time_ParseProprietaryPacket.QuadPart) * 1000.0 / (double)g_PerfFrequency.QuadPart;
+LARGE_INTEGER end_time_ProcessCommandSignal;
+QueryPerformanceCounter(&end_time_ProcessCommandSignal);
+double elapsed_ms_ProcessCommandSignal = (double)(end_time_ProcessCommandSignal.QuadPart - start_time_ProcessCommandSignal.QuadPart) * 1000.0 / (double)g_PerfFrequency.QuadPart;
 
-try {
-    ProcessCommandSignal_post(__hook_result, responseBuffer);
+// Telemetry code
 
-    // Exit Parameter Capturing
-    double output_payloadValue = ReadPointer(payloadValue);
-    std::string output_responseBuffer = CopyString(responseBuffer);
+// Exit Parameter Capturing
+double output_payloadValue = ReadPointer(payloadValue);
+std::string output_responseBuffer = CopyString(responseBuffer);
 	
-    // Telemetry Evaluation
-    if (__hook_result != 200) {
-        spdlog::warn("[WARN] Signal failed | id={} | payload: {:.1f} -> {:.1f} | resp: '{}' -> '{}' | lat={:.2f}ms",
-                     cmdId,
-                     input_payloadValue,
-                     output_payloadValue,
-                     input_responseBuffer,
-                     output_responseBuffer,
-                     elapsed_ms_ProcessCommandSignal);
-    }
-} catch (...) {
-    OutputDebugStringA("[HOOK EXCEPTION] Exception in post-hook\n");
+// Telemetry Evaluation
+if (__hook_result != 200) {
+    spdlog::warn("[WARN] Signal failed | id={} | payload: {:.1f} -> {:.1f} | resp: '{}' -> '{}' | lat={:.2f}ms",
+                input_cmdId,
+                input_payloadValue,
+                output_payloadValue,
+                input_responseBuffer,
+                output_responseBuffer,
+                elapsed_ms_ProcessCommandSignal);
 }
+
+return __hook_result;
 \end{lstlisting}
 
 \subsection{Static Semantic Validation}
@@ -1063,15 +1126,15 @@ Beyond standard syntactic checks (such as verifying unique rule identifiers and 
 \begin{enumerate}
 	\item \textbf{Non-Returning Functions:}
 	For target routines classified as non-returning (\texttt{is\_noreturn: true}), execution never returns after trampoline invocation.
-	The validator statically rejects any telemetry specification on these targets that references post-invocation properties (including \texttt{execution\_time: true}, \texttt{latency}, \texttt{output\_<param>}, or \texttt{\_\_hook\_result}), preventing the generation of dead code.
+	The validator statically rejects any telemetry specification on these targets that references post-invocation properties (including \texttt{execution\_time: true}, \texttt{\_\_hook\_latency}, \texttt{output\_<param>}, or \texttt{\_\_hook\_result}), preventing the generation of dead code.
 	
 	\item \textbf{Custom Histogram Buckets Monotonicity:}
 	Prometheus registry initialization fails at runtime if histogram bucket upper bounds are unordered or non-positive.
 	The transpiler checks custom \texttt{buckets} arrays at compile time to ensure strict positive monotonicity, preventing silent runtime metric registration.
 	
-	\item \textbf{Bounded Metric Cardinality:}
+	\item \textbf{Bounded Label Count:}
 	A possible failure in metric framework is \emph{cardinality explosion}: the unbounded allocation of metric series caused by assigning high-cardinality values to metric labels or by specifying a huge number of different label per metric.
-	HookDesigner strictly restricts metric definitions to at most a single dynamic label, redirecting high-cardinality inspection to structured log events.
+	HookDesigner reduces this risk by strictly restricting metric definitions to at most a single dynamic label, redirecting high-cardinality inspection to structured log events.
 \end{enumerate}
 
 \subsection{Asynchronous Logging}
@@ -1137,7 +1200,7 @@ This initializes a pre-allocated circular queue capable of holding up to an arbi
 
 When a hook function triggers a log rule, the application thread executes only the minimal CPU instructions required to format the argument tuple and push the record into the circular queue.
 No disk I/O, network transmission occurs on the application thread.
-The dedicated background thread drains records from the queue and transmits them to the active sinks, guaranteeing that logging overhead on the host threads remains strictly bounded to memory speed.
+The dedicated background thread drains records from the queue and transmits them to the active target, guaranteeing that logging overhead on the host threads remains strictly bounded to memory speed.
 
 \subsubsection{Buffer Saturation Policy}
 
@@ -1158,11 +1221,7 @@ The logging subsystem supports two distinct log destination (sink):
 	\item \textbf{UDP Sink (\texttt{logger\_config.type: "udp"})}:
 	Industrial deployments frequently aggregate telemetry across distributed nodes into monitoring systems (such as Promtail, Grafana Loki).
 	HookDesigner integrates a non-blocking UDP sink using \texttt{spdlog::}\allowbreak\texttt{sinks::}\allowbreak\texttt{udp\_sink\_mt}.
-	Log messages are formatted according to RFC-5424 Syslog specifications:
-	\begin{lstlisting}[language=C++, basicstyle=\ttfamily\footnotesize]
-logger->set_pattern("<165>1 %Y-%m-%dT%H:%M:%SZ host scada_hook - - - %v");
-	\end{lstlisting}
-	Utilizing connectionless \ac{UDP} transport provides a reliability advantage: if the remote logging server crashes or network connectivity is severed, the operating system kernel immediately discards the packets.
+	Utilizing connectionless \ac{UDP} transport provides an advantage: if the remote logging server crashes or network connectivity is down, the operating system immediately discards the packets.
 	The hook payload never blocks attempting to re-establish TCP handshakes, isolating the host process from external network failures.
 
 	\item \textbf{Local File Sink (\texttt{logger\_config.type: "file"}):}
@@ -1325,17 +1384,17 @@ In this example we can see spdlog logging, counters, cached labeled histograms, 
 
 
 
-\section{Hook Function Safety}
+\section{DLL Runtime Safety}
 \label{sec:safety_fault_tolerance}
 
-As we have seen in \cref{subsec:address_space_isolation}, during binary instrumentation, the compiled payload runs directly inside the target application's virtual address space without any isolation boundary.
-While this shared-memory execution model enables the instrumentation, it introduces safety issues: any possible bugs in the injected code (user callbacks, telemetry code) can make crash the host application immediately.
-In production environments, such unexpected terminations are unacceptable, directly violating the \emph{Crash Safety} design principle established in \cref{subsec:design_principles}.
+As established in \cref{subsec:address_space_isolation}, during \ac{DBI}, the compiled payload runs directly inside the target application's virtual address space without memory isolation boundaries.
+While this shared-memory model enables \ac{DBI}, it introduces several runtime safety issues: a fault or unhandled exception anywhere within the injected \ac{DLL}---whether during lifecycle orchestration (\texttt{InitializeHooks}, \texttt{DeinitializeHooks}) or inside hook function execution (\texttt{\_hook\_body.cpp})---immediately crashes the host process.
+In production environments, such unexpected terminations violate the \emph{Crash Safety} design principle established in \cref{subsec:design_principles}.
 
-To satisfy this requirement, HookDesigner incorporates a defensive architecture designed to prevent possible hook crashes:
+To satisfy this requirement, HookDesigner incorporates a protection mechanisms in both the DLL lifecycle routines and the hook function body:
 \begin{enumerate}
-	\item \textbf{Asynchronous Exception Handling:} By compiling the payload with the MSVC \texttt{/EHa} model, all the possible exceptions are intercepted and prevented from crashing the host process (\cref{subsec:seh}).
-	\item \textbf{Memory Access Helpers:} the transpiler generates safe pointer dereference and string copying helpers that protect argument capturing (\cref{subsec:safe_access}).
+	\item \textbf{Asynchronous Exception Handling:} By compiling the DLL under the MSVC \texttt{/EHa} model, both C++ exceptions and OS hardware faults (\ac{SEH}) are intercepted across lifecycle routines and hook wrappers, preventing host process termination (\cref{subsec:seh}).
+	\item \textbf{Memory Access Helpers:} The transpiler generates safe pointer dereference and string copying primitives that protect against reading invalid memory during parameter capture (\cref{subsec:safe_access}).
 	\item \textbf{Thread-Local Recursion Guard:} A TLS guard prevents re-entrant hook execution loops caused by circular API invocations on the same thread (\cref{subsec:recursion_guard}).
 	\item \textbf{Complete Hook Function Structure:} this structure shows how the presented defenses are integrated within the definitive Hook Function implementation, with specializations for both standard and non-returning functions (\cref{subsec:hook_pipeline}).
 \end{enumerate}
@@ -1343,63 +1402,157 @@ To satisfy this requirement, HookDesigner incorporates a defensive architecture 
 \subsection{Asynchronous Exception Handling}
 \label{subsec:seh}
 
-In standard C++ development on Windows, compilers typically use the synchronous exception model (\texttt{/EHsc}).
+In standard C++ development on Windows, compilers typically use the synchronous exception model (\texttt{/EHsc})~\cite{doc:msvc_eh}.
 Under \texttt{/EHsc}, C++ \texttt{try/catch} blocks are designed only to intercept exceptions thrown explicitly through the C++ \texttt{throw} statement.
-Under this standard configuration, a C++ \texttt{catch(...)} block does not catch  OS-level faults---such as dereferencing a null pointer, reading an unmapped virtual address, or encountering a division by zero.
+Under this standard configuration, a C++ \texttt{catch(...)} block does not catch OS-level faults---such as dereferencing a null pointer, reading an unmapped virtual address, or encountering a division by zero.
 In this way, the exception bypasses user code, triggers the default operating system exception filter, and terminates the host process immediately.
 
 \subsubsection{The /EHa Asynchronous Exception Model}
 
-To eliminate this behavior, HookDesigner's compilation enforces the asynchronous exception handling 
-by passing the \texttt{/EHa} flag to MSVC (\cref{subsec:compilation}) compiler.
+To eliminate this behavior, HookDesigner's compilation enforces the asynchronous exception handling model~\cite{doc:msvc_eh} by passing the \texttt{/EHa} flag to the MSVC (\cref{subsec:compilation}) compiler.
 Under \texttt{/EHa}, the compiler generates structured unwinding tables that bridge Windows kernel \ac{SEH} with C++ exception handling:
 \begin{itemize}
 	\item Standard C++ \texttt{catch(...)} clauses are transformed to catch both synchronous C++ exceptions and asynchronous Win32 hardware faults.
-	\item Proper stack unwinding and destructors execution are guaranteed even when an instruction triggers an OS fault.
+	\item Proper stack unwinding and destructor execution are guaranteed even when an instruction triggers an OS fault.
 \end{itemize}
 
 \subsubsection{Exception Boundaries}
 
-HookDesigner leverages the \texttt{/EHa} model by establishing two isolated boundaries inside each hook function in \texttt{\_hook\_body.cpp}:
-one enclosing pre-execution logic (including telemetry argument capture and user \texttt{pre\_hook} callbacks), and one enclosing post-execution logic (including user \texttt{post\_hook} callbacks, argument exit capture, and telemetry evaluation).
+To prevent cascading failures and isolate runtime faults across the DLL, HookDesigner organizes exception boundaries across two tiers:
 
-\cref{lst:seh_boundaries} illustrates this pattern:
+\paragraph{DLL Lifecycle Functions Tier:}
+The exported lifecycle routines \texttt{InitializeHooks()} and \texttt{DeinitializeHooks()} are enclosed in \texttt{try/catch} blocks compiled under \texttt{/EHa}.
+While the template listings in (\cref{subsec:lifecycle_functions}) focused on the primary attachment and detachment workflows, production safety requires explicit transaction rollback and resource cleanup inside these exception handlers, as shown in \cref{lst:lifecycle_exception_rollback}.
+
+If an unhandled exception or hardware fault occurs during target address resolution, engine transaction commits, HTTP listener initialization, or worker thread flushing, the fault is safely intercepted, logged via \texttt{OutputDebugStringA}, and mapped to an explicit failure exit code (such as \texttt{0xE0000002} for C++ exceptions or \texttt{0xE0000003} for \ac{SEH} hardware faults) returned to the injector via \texttt{CallRemoteExport}.
+Crucially, if a fault occurs while an engine transaction is open (\texttt{in\_transaction == true}), the exception handler triggers an explicit rollback to prevent partial instrumentation:
 \begin{itemize}
-	\item If the fault occurs inside the \emph{pre-hook boundary},  the function jumps directly to the original target function via its trampoline.
-	The host process continues its normal execution without crashing.
-	\item If the fault occurs inside the \emph{post-hook boundary}, the failed callback or telemetry rule is abandoned, and execution returns to the original caller.
+	\item \textbf{Microsoft Detours:} Handled natively via \texttt{DetourTransactionAbort()}, which rolls back all staged detours without modifying memory and closes all opened worker thread handles.
+	\item \textbf{Frida-Gum:} Because Frida-Gum lacks an atomic abort primitive and \texttt{gum\_interceptor\_end\_transaction()} commits pending memory updates, the handler explicitly disarms staged hooks via \texttt{gum\_interceptor\_revert()} before closing the transaction with \texttt{gum\_interceptor\_end\_transaction()}. 
 \end{itemize}
+Finally, partially constructed telemetry structures and TLS allocations are destroyed (\cref{subsec:recursion_guard}).
+This guarantees that an in-flight failure leaves zero dangling hooks, thread suspensions, or corrupted memory pages, allowing the injector to safely execute rollback or ejection fallback handling without destabilizing the host application (\cref{sec:injection_lifecycle}).
 
-\begin{lstlisting}[language=C++, caption={Exception boundaries in \texttt{\_hook\_body.cpp}}, label={lst:seh_boundaries}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-// Pre-Execution Boundary
+\begin{lstlisting}[language=C++, caption={Atomic transaction rollback and resource containment in lifecycle exception handlers.}, label={lst:lifecycle_exception_rollback}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+// catch blocks inside InitializeHooks and DeinitializeHooks
+catch (const std::exception& ex) {
+    // Engine Transaction Rollback
+    // Detours:
+    if (in_transaction) {
+        DetourTransactionAbort();
+    }
+    for (HANDLE hThread : threads) {
+        CloseHandle(hThread); 
+    }
+
+    // Frida-Gum (explicit revert loop before concluding transaction):
+    if (in_transaction && interceptor) {
+        for (auto target : targets) {
+            if (target) gum_interceptor_revert(interceptor, target);
+        }
+        gum_interceptor_end_transaction(interceptor);
+        in_transaction = false;
+    }
+    if (interceptor) {
+        g_object_unref(interceptor);
+        interceptor = nullptr;
+        gum_deinit_embedded();
+    }
+
+    // Teardown initialized telemetry & TLS slots
+    g_PromExposer.reset();
+    g_PromRegistry.reset();
+    spdlog::shutdown();
+    if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
+        TlsFree(g_TlsIndex);
+        g_TlsIndex = TLS_OUT_OF_INDEXES;
+    }
+
+    std::string msg = fmt::format("[CRITICAL] Exception in lifecycle routine: {}\n", ex.what());
+    OutputDebugStringA(msg.c_str());
+    return 0xE0000002; // Custom failure code for C++ exception returned to injector
+}
+catch (...) {
+    // Engine rollback and resource deallocation identical to above...
+    OutputDebugStringA("[CRITICAL] SEH/Hardware fault in lifecycle routine\n");
+    return 0xE0000003; // Custom failure code for SEH/Hardware fault returned to injector
+}
+\end{lstlisting}
+
+\paragraph{Hook Function Tier:}
+Inside the body of each hooked function (\texttt{\_hook\_body.cpp}), execution is segmented into decoupled, independent exception boundaries:
+\begin{enumerate}
+	\item \textbf{Parameter Capture Boundaries:}
+	Entry and exit argument captures are wrapped in dedicated exception boundaries.
+	If an \ac{SEH} hardware fault occurs, the error is logged with the corresponding parameter name, and execution safely continues without aborting user-defined callbacks.
+
+	\item \textbf{User Callback Boundaries:}
+	User-defined callbacks (\texttt{pre\_hook} and \texttt{post\_hook}) execute inside separate, independent exception blocks.
+	A fault within user code is contained, guaranteeing that the target function is still invoked via its trampoline (\texttt{TrueTargetFunction}), that the telemetry code is executed and that the return value is safely passed back to the caller.
+
+	\item \textbf{Telemetry Evaluation Boundary:}
+	Telemetry evaluation is placed inside its own exception boundary, if any required parameter failed to capture, telemetry evaluation is automatically skipped. This prevents format strings and metric observations from computing over uninitialized or corrupted memory.
+	Furthermore, any exception encountered during telemetry emission cannot destabilize the host application or corrupt the function return code.
+\end{enumerate}
+
+\cref{lst:seh_boundaries} illustrates this decoupled pattern:
+
+\begin{lstlisting}[language=C++, caption={Decoupled exception boundaries in \texttt{\_hook\_body.cpp}}, label={lst:seh_boundaries}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+// Entry Parameter Capture Boundary
+bool telemetry_inputs_ready = false;
+const char* capturing_input_param = nullptr;
 try {
-    // Parameter capture and user pre-hook
+    capturing_input_param = "payloadValue";
     input_payload = ReadPointer(payloadValue);
-    UserPreCallback(payloadValue);
-    
-} catch (const std::exception& ex) {  //captures standard C++ exceptions
-    OutputDebugStringA("[HOOK EXCEPTION] Access violation contained in pre-hook\n");
-} 
+    telemetry_inputs_ready = true;
+} catch (const std::exception& ex) {
+    OutputDebugStringA(fmt::format("[HOOK CAPTURE] Exception in {}: {}\n", capturing_input_param, ex.what()).c_str());
+} catch (...) {
+    OutputDebugStringA(fmt::format("[HOOK CAPTURE] SEH fault in {}\n", capturing_input_param).c_str());
+}
 
-catch (...) {  //captures also Win32 hardware faults (thanks to the /EHa flag)
-    OutputDebugStringA("[HOOK EXCEPTION] Access violation contained in pre-hook\n");
+// Pre-Hook User Logic Boundary
+try {
+    UserPreCallback(payloadValue);
+} catch (const std::exception& ex) {
+    OutputDebugStringA("[HOOK EXCEPTION] Exception in pre-hook\n");
+} catch (...) {
+    OutputDebugStringA("[HOOK EXCEPTION] Hardware/SEH fault in pre-hook\n");
 }
 
 int __hook_result = TrueTargetFunction(payloadValue);
 
-// Post-Execution Boundary
+//Post-Hook User Logic Boundary
 try {
-    // User post-hook, exit capture, telemetry
-    
     UserPostHook(__hook_result);
-   
-    output_payload = ReadPointer(payloadValue);
-    EvaluateTelemetry();
 } catch (const std::exception& ex) {
-    OutputDebugStringA("[HOOK EXCEPTION] Access violation contained in post-hook\n");
-
+    OutputDebugStringA("[HOOK EXCEPTION] Exception in post-hook\n");
 } catch (...) {
-    OutputDebugStringA("[HOOK EXCEPTION] Access violation contained in post-hook\n");
+    OutputDebugStringA("[HOOK EXCEPTION] Hardware/SEH fault in post-hook\n");
+}
+
+//Exit Parameter Capture Boundary
+bool telemetry_outputs_ready = false;
+const char* capturing_output_param = nullptr;
+try {
+    capturing_output_param = "payloadValue";
+    output_payload = ReadPointer(payloadValue);
+    telemetry_outputs_ready = true;
+} catch (const std::exception& ex) {
+    OutputDebugStringA(fmt::format("[HOOK CAPTURE] Exception in {}\n", capturing_output_param).c_str());
+} catch (...) {
+    OutputDebugStringA(fmt::format("[HOOK CAPTURE] SEH fault in {}\n", capturing_output_param).c_str());
+}
+
+// Telemetry Evaluation Boundary
+if (telemetry_inputs_ready && telemetry_outputs_ready) {
+    try {
+        EvaluateTelemetry();
+    } catch (const std::exception& ex) {
+        OutputDebugStringA("[TELEMETRY EXCEPTION] Exception in telemetry\n");
+    } catch (...) {
+        OutputDebugStringA("[TELEMETRY EXCEPTION] Unknown exception in telemetry\n");
+    }
 }
 
 return __hook_result;
@@ -1408,7 +1561,7 @@ return __hook_result;
 \subsection{Transpiler Type Analysis and Memory Access Helpers}
 \label{subsec:safe_access}
 
-As already explained in \cref{subsec:param_capture}, binary instrumentation authors often need to inspect function parameters on function entry and exit.
+As already explained in \cref{subsec:param_capture}, \ac{DBI} authors often need to inspect function parameters on function entry and exit.
 However, manually writing C++ code to capture parameters' value is error-prone: forgetting a null check, dereferencing an invalid pointer, or traversing an unbounded string can easily cause memory access violations.
 To help the work of policy authors, HookDesigner \emph{automates} access to primitive variables and strings in a safe way.
 By analyzing parameter types at transpile time, the framework automatically generates the appropriate access solution, preventing the author from writing repetitive and error-prone C++ boilerplate.
@@ -1499,10 +1652,21 @@ This design establishes an explicit contract:
 	\item \textbf{Exception Boundary Safety:} However, any possible error of the policy author is intercepted by the outer \texttt{/EHa} SEH containment boundary, preventing any possible host crash.
 \end{itemize}
 
+\subsubsection{Array-to-Pointer Decay}
+\label{subsubsec:array_decay}
+
+A fundamental characteristic of the C and C++ type systems is \emph{array-to-pointer decay}: function parameters declared as arrays decay into raw pointer types within the Clang type analysis without preserving runtime size metadata.
+Consequently, HookDesigner's automated analysis (\cref{tab:type_analysis_matrix}) cannot deduce the allocated extent of an arbitrary pointer argument at transpile time without external semantic annotations.
+
+To uphold strict memory safety and avoid out-of-bounds reads or buffer overread vulnerabilities, HookDesigner deliberately enforces dereferencing: automated parameter capture for non-character pointer types (\texttt{T*}) strictly dereferences the element at index zero via the \texttt{ReadPointer<T>} helper.
+If an instrumentation policy requires inspecting across array elements, this logic cannot be expressed through automated YAML telemetry rules.
+Instead, buffer inspection is explicitly delegated to user-defined pre- or post-execution callbacks implemented within the companion C++ logic file (\cref{subsec:logic_file}).
+Inside these callbacks, the developer operates with full C++ expressiveness, enabling array traversal.
+
 \subsection{Recursion Guard}
 \label{subsec:recursion_guard}
 
-In binary instrumentation, a common cause of unexpected process termination is \emph{hook re-entrancy}.
+In \ac{DBI}, a common cause of unexpected process termination is \emph{hook re-entrancy}.
 Because hooks are installed globally at the entry point of target APIs, any code executed inside the hook payload that directly or indirectly calls a hooked function can trigger an infinite loop on the calling thread.
 
 \subsubsection{The Re-Entrancy Mechanism}
@@ -1626,7 +1790,7 @@ Depending on whether the intercepted target function returns to its caller or is
 
 To illustrate how these defenses integrate in practice for standard returning targets, \cref{lst:generated_hook_function} presents a complete generated C++ Hook function.
 
-\begin{lstlisting}[language=C++, caption={Complete generated hook function demonstrating integrated safety mechanisms.}, label={lst:generated_hook_function}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+\begin{lstlisting}[language=C++, caption={Complete generated hook function demonstrating integrated safety mechanisms and decoupled exception boundaries.}, label={lst:generated_hook_function}, basicstyle=\ttfamily\footnotesize, breaklines=true]
 int __stdcall HookedProcessPacket(int packetId, char* payload, double* sensorVal) {
     // Thread Re-Entrancy Check
     if (TlsGetValue(g_TlsIndex) != 0) {
@@ -1637,16 +1801,28 @@ int __stdcall HookedProcessPacket(int packetId, char* payload, double* sensorVal
     RecursionHookGuard hook_recursion_guard;
     HookActiveThreads hook_active_threads;
 
+    // 1. Entry Parameter Capture Boundary
+    bool telemetry_inputs_ready = false;
+    const char* capturing_input_param = nullptr;
     int input_packetId = {};
     std::string input_payload = {};
     double input_sensorVal = {};
-
-    // Pre-Execution Boundary
     try {
+        capturing_input_param = "packetId";
         input_packetId = packetId;
+        capturing_input_param = "payload";
         input_payload = CopyString(payload);
+        capturing_input_param = "sensorVal";
         input_sensorVal = ReadPointer(sensorVal);
+        telemetry_inputs_ready = true;
+    } catch (const std::exception& ex) {
+        OutputDebugStringA(fmt::format("[HOOK CAPTURE] Exception in {}: {}\n", capturing_input_param, ex.what()).c_str());
+    } catch (...) {
+        OutputDebugStringA(fmt::format("[HOOK CAPTURE] Hardware/SEH fault in {}\n", capturing_input_param).c_str());
+    }
 
+    // 2. Pre-Logic Execution Boundary
+    try {
         ProcessPacket_pre(packetId, payload);
     } catch (const std::exception& ex) {
         OutputDebugStringA("[HOOK EXCEPTION] Pre-hook error in ProcessPacket\n");
@@ -1665,24 +1841,44 @@ int __stdcall HookedProcessPacket(int packetId, char* payload, double* sensorVal
     QueryPerformanceCounter(&end_time);
     double elapsed_ms = (end_time.QuadPart - start_time.QuadPart) * 1000.0 / g_PerfFrequency.QuadPart;
 
-    // Post-Execution Boundary
-
-	//After Trampoline execution, re-acquire guard
+    // After Trampoline execution, re-acquire guard
     hook_recursion_guard.Acquire();
+
+    // 3. Post-Logic Execution Boundary
     try {
         ProcessPacket_post(__hook_result, payload);
-
-        double output_sensorVal = ReadPointer(sensorVal);
-
-        spdlog::info("[PACKET] ID: {}, Latency: {:.2f}ms", input_packetId, elapsed_ms);
-        if (g_PromMetric_ProcessPacket_invocations) {
-            g_PromMetric_ProcessPacket_invocations->Increment();
-        }
     } catch (const std::exception& ex) {
-    	OutputDebugStringA("[HOOK EXCEPTION] post-hook error in ProcessPacket\n");
-    } 
-    catch (...) {
-    	OutputDebugStringA("[HOOK EXCEPTION] Access violation in post-hook\n");
+        OutputDebugStringA("[HOOK EXCEPTION] Post-hook error in ProcessPacket\n");
+    } catch (...) {
+        OutputDebugStringA("[HOOK EXCEPTION] Access violation in post-hook\n");
+    }
+
+    // 4. Exit Parameter Capture Boundary
+    bool telemetry_outputs_ready = false;
+    const char* capturing_output_param = nullptr;
+    double output_sensorVal = {};
+    try {
+        capturing_output_param = "sensorVal";
+        output_sensorVal = ReadPointer(sensorVal);
+        telemetry_outputs_ready = true;
+    } catch (const std::exception& ex) {
+        OutputDebugStringA(fmt::format("[HOOK CAPTURE] Exception in output {}: {}\n", capturing_output_param, ex.what()).c_str());
+    } catch (...) {
+        OutputDebugStringA(fmt::format("[HOOK CAPTURE] Hardware/SEH fault in output {}\n", capturing_output_param).c_str());
+    }
+
+    // 5. Guarded Telemetry Evaluation Boundary
+    if (telemetry_inputs_ready && telemetry_outputs_ready) {
+        try {
+            spdlog::info("[PACKET] ID: {}, Latency: {:.2f}ms", input_packetId, elapsed_ms);
+            if (g_PromMetric_ProcessPacket_invocations) {
+                g_PromMetric_ProcessPacket_invocations->Increment();
+            }
+        } catch (const std::exception& ex) {
+            OutputDebugStringA("[TELEMETRY EXCEPTION] Exception in telemetry\n");
+        } catch (...) {
+            OutputDebugStringA("[TELEMETRY EXCEPTION] Unknown exception in telemetry\n");
+        }
     }
 
     return __hook_result;
@@ -1729,19 +1925,39 @@ void WINAPI HookedRaiseException(DWORD dwExceptionCode, DWORD dwExceptionFlags,
     RecursionHookGuard hook_recursion_guard;
     HookActiveThreads hook_active_threads;
 
+    // 1. Entry Parameter Capture Boundary
+    bool telemetry_inputs_ready = false;
+    const char* capturing_input_param = nullptr;
+    DWORD input_dwExceptionCode = {};
+    DWORD input_dwExceptionFlags = {};
     try {
-        DWORD input_dwExceptionCode = dwExceptionCode;
-        DWORD input_dwExceptionFlags = dwExceptionFlags;
-        RaiseException_pre(dwExceptionCode, dwExceptionFlags, nNumberOfArguments);
+        capturing_input_param = "dwExceptionCode";
+        input_dwExceptionCode = dwExceptionCode;
+        capturing_input_param = "dwExceptionFlags";
+        input_dwExceptionFlags = dwExceptionFlags;
+        telemetry_inputs_ready = true;
+    } catch (...) {
+        OutputDebugStringA("[HOOK CAPTURE] Fault capturing input parameters\n");
+    }
 
-        // INVERTED TELEMETRY: BEFORE trampoline call
-        spdlog::error("[RaiseException] Code: 0x{:x}, Flags: 0x{:x}", 
-                      input_dwExceptionCode, input_dwExceptionFlags);
+    // 2. Pre-Hook User Logic Boundary
+    try {
+        RaiseException_pre(dwExceptionCode, dwExceptionFlags, nNumberOfArguments);
     } catch (...) {
         OutputDebugStringA("[HOOK EXCEPTION] Exception in RaiseException pre-hook\n");
     }
 
-    //EXPLICIT GUARD RELEASE: Decrements activeThreads before trampoline
+    // 3. Guarded Inverted Telemetry (BEFORE Trampoline)
+    if (telemetry_inputs_ready) {
+        try {
+            spdlog::error("[RaiseException] Code: 0x{:x}, Flags: 0x{:x}", 
+                          input_dwExceptionCode, input_dwExceptionFlags);
+        } catch (...) {
+            OutputDebugStringA("[TELEMETRY EXCEPTION] Exception in telemetry\n");
+        }
+    }
+
+    // EXPLICIT GUARD RELEASE: Decrements activeThreads before trampoline
     hook_recursion_guard.Release();
     hook_active_threads.Release();
 
@@ -1790,7 +2006,7 @@ To resolve the address of exported remote functions across ASLR boundaries, \tex
 	Because the relative layout of code sections and the export directory is fixed at link time and does not change when a module is relocated, this offset is \emph{invariant} across all address spaces.
 	\item \textbf{Remote Base Address Discovery:} The injector enumerates the target process's loaded modules using the Toolhelp32 snapshot API (\texttt{CreateToolhelp32Snapshot}, locating the target's remote base address \texttt{hRemoteModule} matching the \ac{DLL} filename.
 	\item \textbf{Remote Function Execution:} The remote function address is computed by adding the offset relative to the remote base.
-	The injector then launches a thread targeting $pRemoteFunc$, waits for it to finish, and collects its return value.
+	After freeing the temporary local module mapping with \texttt{FreeLibrary}, the injector launches a remote thread targeting $pRemoteFunc$ and waits for it to complete.
 \end{enumerate}
 
 \begin{lstlisting}[language=C++, caption={Cross-process export resolution via RVA offset invariance in \texttt{CallRemoteExport}.}, label={lst:rva_offset_invariance}, basicstyle=\ttfamily\footnotesize, breaklines=true]
@@ -1801,6 +2017,7 @@ FARPROC pLocalFunc = GetProcAddress(hLocalMod, exportName.c_str());
 // 2. Compute invariant RVA offset and resolve target address under ASLR
 DWORD_PTR offset = (DWORD_PTR)pLocalFunc - (DWORD_PTR)hLocalMod;
 LPVOID pRemoteFunc = (LPVOID)((DWORD_PTR)hRemoteModule + offset);
+FreeLibrary(hLocalMod);
 
 // 3. Trigger remote execution in target process
 HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, 
@@ -1811,30 +2028,39 @@ WaitForSingleObject(hThread, INFINITE);
 \subsubsection{The Loader Lock Issue}
 \label{subsec:lock_issue}
 
-A common anti-pattern in binary instrumentation is to install complex hooks directly inside the \ac{DLL} entry point, \texttt{DllMain}, as we have seen in \cref{lst:dllMain}.
-In simple hooking scenarios, this could be convenient, but in instrumentation payloads that present complex features (e.g. high-performance telemetry), this approach can cause a deadlock during DLL injection.
+A common anti-pattern in \ac{DBI} is to perform complex tasks directly inside the \ac{DLL} entry point, \texttt{DllMain}, as introduced in \cref{lst:dllMain}.
+While convenient for trivial payloads, executing complex instrumentation routines inside \texttt{DllMain} introduces severe concurrency issues on Windows due to the OS \emph{Loader Lock}.
 
-Whenever the Windows operating system maps a \ac{DLL} into a process, creates or terminates a thread, the loader need to acquire an internal, process-wide Loader Lock.
-While this lock is held, the loader invokes the \texttt{DllMain} functions of all loaded modules.
-Binary instrumentation guidelines suggest not acquiring user-mode locks, creating threads, or initializing network sockets within \texttt{DllMain}.
+Whenever the Windows operating system maps or unmaps a \ac{DLL}, or when a process creates or terminates a thread, the OS loader must acquire an internal, process-wide synchronization primitive known as the Loader Lock.
+While this lock is held, the loader sequentially executes the \texttt{DllMain} routines of all loaded modules.
+Consequently, binary engineering guidelines explicitly prohibit thread synchronization, waiting on external events, and socket initialization within \texttt{DllMain}~\cite{doc:msdn_dll_best_practices}.
 
-HookDesigner's telemetry engine (\cref{sec:telemetry_engine}) relies on two background subsystems:
+HookDesigner's telemetry (whose initialization would be in \texttt{DLL\_PROCESS\_ATTACH}:) (\cref{sec:telemetry_engine}) relies on two asynchronous background subsystems:
 \begin{itemize}
-	\item \textbf{Asynchronous Logging} (\texttt{spdlog}): Spawns a background thread to flush log messages.
-	\item \textbf{Metrics Server} (\texttt{prometheus-cpp}): Initializes a CivetWeb HTTP listener thread to serve metric scrapers.
+	\item \textbf{Asynchronous Logging} (\texttt{spdlog}): Spawns a background worker thread to drain ring buffers and flush log messages.
+	\item \textbf{Metrics Server} (\texttt{prometheus-cpp}): Spawns CivetWeb HTTP listener threads to serve metric scrapers.
 \end{itemize}
 
-If \texttt{InitializeHooks()} were invoked from inside \texttt{DllMain(DLL\_PROCESS\_ATTACH)}, the following circular deadlock would occur:
+A circular deadlock occurs whenever the calling thread inside \texttt{DllMain} blocks waiting upon those background threads.
+In HookDesigner's architecture, executing lifecycle logic under Loader Lock exposes two catastrophic deadlock modes:
+
 \begin{enumerate}
-	\item The injector thread calls \texttt{LoadLibraryA}, acquiring Loader Lock and entering \texttt{DllMain}.
-	\item \texttt{DllMain} starts the \texttt{spdlog} thread pool or Prometheus HTTP server, creating a new worker thread.
-	\item Before the new worker thread can execute user code, the operating system loader initializes the thread unconditionally acquiring Loader Lock to initialize Thread Local Storage and dispatch \texttt{DLL\_THREAD\_ATTACH} notifications.
-	\item However, that Lock is already held by the injector thread, which is waiting for the worker thread or socket initialization to complete.
-	\item The two threads are deadlocked, permanently freezing the target process.
+	\item \textbf{The Initialization Rollback Deadlock:}
+	During normal startup, telemetry initialization requires asynchronous thread creation without an immediate startup join.
+	However, if any subsequent initialization step fails, the exception handler immediately invokes the rollback sequence (\cref{lst:lifecycle_exception_rollback}) to prevent partial instrumentation.
+	This cleanup triggers a blocking call (\texttt{WaitForSingleObject}) on the newly spawned worker threads.
+	Because those workers are permanently trapped waiting for the Loader Lock held by \texttt{DllMain} and the thread in \texttt{DllMain} waits on those worker threads, the result is a circular deadlock.
+	
+	\item \textbf{The Deinitialization Deadlock:}
+	Similarly, when an instrumentation payload is dynamically unloaded, the operating system acquires the Loader Lock before invoking \texttt{DllMain(DLL\_PROCESS\_DETACH)}.
+	Executing \texttt{DeinitializeHooks()} inside this handler requires tearing down and joining all background telemetry threads before the module is unmapped from memory.
+	As in the rollback scenario, joining these exiting threads while holding the Loader Lock triggers the same circular deadlock seen in the rollback mechanism.
 \end{enumerate}
 
-\paragraph{The Two-Phase Protocol}
-\label{subsec:two-phase}
+
+
+\subsubsection{The Two-Phase Protocol}
+\label{two-phase}
 
 To eliminate this issue, HookDesigner separates DLL mapping from hooks activation using a \emph{Two-Phase Protocol}:
 
@@ -1856,7 +2082,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
 	
 	\item \textbf{Phase~2 (Active Initialization):} Once the Phase~1 remote thread exits, the injector computes the remote address of \texttt{InitializeHooks} via RVA offset invariance (\cref{lst:rva_offset_invariance}) and launches a second remote thread.
 	Because this second thread runs entirely outside \texttt{DllMain} and so outside Loader Lock, it can safely initialize the \texttt{spdlog} background thread pool, bind the Prometheus HTTP metrics server, and install transactional inline hooks, bypassing the Loader Lock deadlock risk.
+	
 \end{itemize}
+
+Furthermore, the injector inspects the remote exit code returned by \texttt{InitializeHooks}.
+In  injection mode, if initialization fails (returning a non-zero code), the injector automatically executes a rollback by remotely invoking \texttt{FreeLibrary} to unload the \ac{DLL}, leaving the host process running uncorrupted.
 
 \subsubsection{Engine-Specific Initialization Mechanics}
 
@@ -1893,38 +2123,6 @@ This process incorporates all the HookDesigner's features we have seen so far th
 	\label{tab:engine_init_comparison}
 \end{table}
 
-\subsubsection{Low-Level Primitives Hooking}
-\note{Advisor}{cyan}{Non so se mettere questa parte nel capitolo Background}
-\label{subsubsec:rip_heap_hazards}
-
-As summarized in \cref{tab:engine_init_comparison}, Microsoft Detours and Frida-Gum have a fundamental architectural divergence in how they handle threads within transactions: Detours explicitly enumerates, enlists, and suspends all process worker threads (\texttt{EnlistAllThreads}), whereas Frida-Gum relies entirely on atomic instruction writes without suspending worker threads.
-This difference can cause problem when instrumenting live, multi-threaded Windows processes using Frida.
-
-\paragraph{The Instruction Pointer Relocation}
-When instrumenting frequently invoked, low-level Win32 primitives in a running process, application worker threads have more probability to be executing the very prologue bytes that the hooking engine is preparing to overwrite:
-\begin{itemize}
-	\item \textbf{Microsoft Detours} (\texttt{detours\_template.cpp}): 
-	As detailed in \cref{subsec:transactional_patching}, Detours enlists all active worker threads and leverages \texttt{DetourUpdateThread()} during \texttt{DetourTransactionCommit()}.
-	By suspending threads and inspecting their register contexts, Detours dynamically relocates any \ac{IP} (\texttt{RIP}/\texttt{EIP}) detected within the overwritten prologue to the corresponding offset in the trampoline code, allowing threads to resume execution seamlessly without instruction corruption.
-	\item \textbf{Frida-Gum} (\texttt{frida\_template.cpp}): 
-	Frida-Gum applies atomic in-memory instruction patching within, but it does \emph{not} inspect or manipulate the \texttt{RIP} registers of running worker threads.
-	If a background thread happens to be executing the first few prologue bytes of the target function at the exact instant the transaction commits, its instruction pointer lands mid-instruction on a partial jump displacement.
-	When the CPU attempts to decode this corrupted byte sequence an \texttt{Access Violation} make the host process crash.
-\end{itemize}
-
-\paragraph{The Process Heap Lock Deadlock}
-A natural question is whether HookDesigner could avoid Frida-Gum's \texttt{RIP/EIP} issue by wrapping its transactional APIs in a manual thread-suspension loop as made in Detours.
-In multi-threaded applications, however, this approach introduces a deadlock:
-\begin{itemize}
-	\item Frida-Gum's runtime engine dynamically allocates heap memory during \texttt{gum\_interceptor\_}\allowbreak\texttt{replace()} and \texttt{gum\_interceptor\_}\allowbreak\texttt{end\_}\allowbreak\texttt{transaction()} to construct listener invocation frames and code allocation pages.
-	Under Windows, these allocations needs the NT Process Heap Lock.
-	\item If HookDesigner enumerates and suspends all worker threads prior to committing the Frida transaction, an arbitrary worker thread may be suspended while currently owning the process heap lock.
-	\item When the injector thread calls \texttt{gum\_interceptor\_end\_transaction()}, Frida attempts to allocate memory, attempting to acquire the process heap lock.
-	Because the thread holding this lock is suspended, the injector thread blocks indefinitely waiting for the lock, resulting in a deadlock that permanently freezes the target process.
-	\item Microsoft Detours avoided this deadlock through low-level engineering: its transaction commit routine was meant to perform \emph{zero heap allocations} while threads are suspended.
-	All necessary trampolines and data structures are pre-allocated before threads are paused, ensuring that thread suspension and \texttt{RIP} adjustment never collide with the process heap lock.
-\end{itemize}
-
 \subsection{Injector Launch Mode}
 \label{subsec:launch_mode}
 
@@ -1941,14 +2139,16 @@ The execution sequence for launch mode proceeds through four steps:
 
 \begin{enumerate}
 	\item \textbf{Process Instantiation:} The utility calls \texttt{CreateProcessA} specifying the process creation flag \texttt{CREATE\_SUSPENDED}.
-	The Windows kernel allocates the process object, initializes its private virtual address space and creates the primary thread.
-	However, the primary thread's instruction pointer is frozen at the binary entry point before any application-level initialization run.
-	\item \textbf{Hook Activation:} While the main thread remains frozen, the injector applies the Two-Phase Protocol (\cref{subsec:two-phase}):
+	When launching a process with this flag, the primary thread is created and suspended before reaching the application entry point~\cite{book:windows_internals}.
+	
+	Consequently, when \texttt{InitializeHooks} is invoked via a remote thread prior to resuming the primary thread, \texttt{GetModuleHandleA} can only resolve modules present in the static Import Address Table (IAT) or those imported by the injected \ac{DLL} itself. Any library that the target application loads dynamically at runtime via \texttt{LoadLibrary} or through delay-loading (\texttt{/DELAYLOAD}) will not yet be present in the PEB loader database; resolving symbols within such modules yields \texttt{NULL}, causing the hook initialization routine to log a warning and skip attachment for those targets.
+	\item \textbf{Hook Activation:} While the main thread remains frozen, the injector applies the Two-Phase Protocol (\cref{two-phase}):
 	\begin{itemize}
 		\item It injects the instrumentation \ac{DLL} via a remote thread pointing to \texttt{LoadLibraryA}.
 		\item It computes the remote address of \texttt{InitializeHooks} and activates all hooks via a second remote thread.
 	\end{itemize}
-	\item \textbf{Primary Thread Resumption:} The injector calls \texttt{ResumeThread}, decrementing the suspend count to zero.
+	Upon completion of \texttt{InitializeHooks}, the injector validates the remote thread's exit code: if it is non-zero (indicating Hooks initialization failure), the injector aborts and terminates the suspended process via \texttt{TerminateProcess} to avoid executing an uninstrumented or partially configured target.
+	\item \textbf{Primary Thread Resumption:} When \texttt{InitializeHooks} returns \texttt{0} (success), the injector calls \texttt{ResumeThread}, decrementing the suspend count to zero.
 	The primary thread awakens and begins executing its startup sequence.
 	Because hooks are already active, any function intercepted by the policy that executes during application startup is captured from its very first call.
 	\item \textbf{Process Termination:} The injector observes process execution, queries its exit code via \texttt{GetExitCodeProcess}, and cleanly terminates.
@@ -2056,7 +2256,7 @@ The execution sequence for launch mode proceeds through four steps:
 \subsection{DLL Ejection}
 \label{subsec:ejection}
 
-When binary instrumentation is no longer required, the payload must detach cleanly so that the target process can continue running without interruption.
+When instrumentation is no longer required, the payload must detach cleanly so that the target process can continue running without interruption.
 As analyzed in \cref{subsec:ejection_sync}, reversing prologue bytes is necessary but not sufficient: in a multi-threaded application, worker threads may already be executing within hook routines when detachment begins.
 If the host unmaps the \ac{DLL} via \texttt{FreeLibrary} while a worker thread's instruction pointer points to unmapped memory, the process crashes immediately with an Access Violation.
 
@@ -2099,70 +2299,7 @@ struct HookActiveThreads {
 \subsubsection{The DLL Ejection Mechanism}
 
 When \texttt{injector.exe eject <PID> <DLL>} is executed, it remotely invokes the exported function \texttt{DeinitializeHooks()} via \texttt{CallRemoteExport}, using the same method of the injection, (\cref{lst:rva_offset_invariance}), for preventing Loader Lock deadlock (\cref{subsec:lock_issue}) possible also during ejection.
-The payload then performs a five-step ejection sequence, illustrated in \cref{fig:ejection_sequence}:
-
-\begin{figure}[H]
-	\centering
-	\resizebox{0.98\linewidth}{!}{%
-	\begin{tikzpicture}[
-		>=Stealth,
-		font=\footnotesize,
-		stepnode/.style={draw, rounded corners=3pt, align=left, thick, fill=blue!8, draw=blue!70, minimum width=12.0cm, minimum height=0.85cm},
-		decision/.style={draw, diamond, aspect=2.2, align=center, thick, fill=yellow!15, draw=yellow!80!black, font=\scriptsize},
-		term/.style={draw, rounded corners=3pt, align=center, thick, minimum width=3.8cm, minimum height=0.7cm},
-		arrow/.style={-{Stealth[length=2.0mm]}, thick}
-	]
-		\node[stepnode] (s1) at (0, 0) {
-			\textbf{Step 1: Terminate Background Prometheus Threads}\\
-			Destroys CivetWeb HTTP listener (\texttt{g\_PromExposer.reset()}); internal threads exit.
-		};
-
-		\node[stepnode, below=0.4cm of s1] (s2) {
-			\textbf{Step 2: Atomically Revert Hook Patches}\\
-			Restores original target prologues; blocks new calls from entering hook logic.
-		};
-
-		\node[stepnode, below=0.4cm of s2] (s3) {
-			\textbf{Step 3: Two-Second Spin-Wait Loop}\\
-			Polls for up to 2\,s until hook active threads drain to zero.
-		};
-
-		\node[decision, below=0.5cm of s3] (dec) {Active threads\\drained to zero?};
-
-		% Success Branch
-		\node[stepnode, below=0.6cm of dec] (s4) {
-			\textbf{Step 4: Destruction of Telemetry Subsystems}\\
-			Destroys loggers (\texttt{spdlog::shutdown()}) and metrics registries after thread drain confirmation.
-		};
-
-		\node[stepnode, below=0.4cm of s4] (s5) {
-			\textbf{Step 5: Runtime Deallocation \& Success Exit}\\
-			Frees TLS slot, deinitializes engine, and returns \texttt{TRUE} (1) to injector.
-		};
-
-		% Failure Branch
-		\node[term, fill=red!15, draw=red!70!black, right=2.1cm of dec] (fail) {
-			\textbf{DLL-Leak Fallback}\\
-			$\bullet$ Preserve telemetry registries\\
-			$\bullet$ Skip logger destruction\\
-			$\bullet$ Preserve TLS slot \& runtime\\
-			$\bullet$ Return \texttt{FALSE} (0) to injector\\
-			(\cref{subsec:dll_leak})
-		};
-
-		\draw[arrow] (s1) -- (s2);
-		\draw[arrow] (s2) -- (s3);
-		\draw[arrow] (s3) -- (dec);
-		\draw[arrow] (dec) -- node[right, font=\scriptsize\bfseries] {Yes (\texttt{g\_Ejected == true})} (s4);
-		\draw[arrow] (s4) -- (s5);
-		\draw[arrow] (dec) -- node[above, font=\scriptsize\bfseries] {No (Timeout)} (fail);
-
-	\end{tikzpicture}%
-	}
-	\caption{Five-step ejection sequence inside \texttt{DeinitializeHooks()}}
-	\label{fig:ejection_sequence}
-\end{figure}
-
+The payload then performs the following five-step ejection sequence:
 \begin{enumerate}
 	\item \textbf{Terminate Background Listener Threads:}
 	The payload resets the Prometheus HTTP exposer.
@@ -2174,50 +2311,20 @@ The payload then performs a five-step ejection sequence, illustrated in \cref{fi
 	Once the transaction commits, original prologue bytes are restored in memory.
 	New function calls execute the unhooked target code directly; no new threads can enter the hook functions.
 
-	\item \textbf{Two-Second Spin-Wait Loop:}
+	\item \textbf{Bounded Drain Wait:}
 	Although new calls cannot enter, worker threads that were already inside the hook routines before Step~2 may still be executing.
-	To synchronize safely, the payload enters a spin-wait loop with a 2-second (2000\,ms) timeout.
-	Under Microsoft Detours, the loop polls only the atomic counter:
-	\begin{lstlisting}[language=C++, basicstyle=\ttfamily\footnotesize, numbers=none]
-DWORD start = GetTickCount();
-while (GetTickCount() - start < 2000) {
-    if (activeThreads.load() == 0) {
-        Sleep(1000); // Confirmation interval
-        if (activeThreads.load() == 0) {
-            g_Ejected = true;
-            break;
-        }
-    }
-    Sleep(50);
-}
-	\end{lstlisting}
-	Under Frida-Gum, the spin-wait loop adapts based on whether non-returning functions are declared in the policy:
-	\begin{lstlisting}[language=C++, basicstyle=\ttfamily\footnotesize, numbers=none]
-		DWORD start = GetTickCount();
-		while (GetTickCount() - start < 2000) {
-			{% if has_noreturn %}
-			if (gum_interceptor_flush(interceptor) && activeThreads.load() == 0) {
-				Sleep(1000); // Confirmation interval
-				if (activeThreads.load() == 0) {
-					g_Ejected = true;
-					break;
-				}
-			}
-			{% else %}
-			if (gum_interceptor_flush(interceptor)) {
-				g_Ejected = true;
-				break;
-			}
-			{% endif %}
-			Sleep(50);
-		}
-	\end{lstlisting}
-	If the policy intercepts exclusively returning functions, calling \texttt{gum\_}\allowbreak\texttt{interceptor\_}\allowbreak\texttt{flush()} is reliable to confirm that active threads have exited, allowing immediate ejection.
-	However, if non-returning functions are present (\texttt{has\_noreturn}), they bypass Frida-Gum's built-in thread tracking.
-	In this case, the template emits a dual check requiring both \texttt{gum\_interceptor\_}\allowbreak\texttt{flush()} and \texttt{activeThreads.load() == 0}
-	The confirmation interval (\texttt{Sleep(1000\,ms)}) is required because the \texttt{HookActiveThreads} RAII guard decrements the counter inside its destructor, just before the function function returns.
-	Consequently, a thread may reach zero while still executing trailing function epilogue instructions (such as register restoration and the final \texttt{ret}) inside the \ac{DLL}'s virtual address space.
-	If ejection and module unmapping occurred immediately upon reaching zero, a preempted thread executing these trailing instructions would crash with an Access Violation on unmapped memory.
+	To synchronize safely, the payload polls a drain condition for at most $T_{\mathrm{drain}}=2$\,s (\cref{alg:deinit}).
+	What ``drained'' means depends on the engine and, for Frida-Gum, on the policy (\cref{tab:drain_variants}); the template fixes this choice once, at code-generation time.
+	\begin{itemize}
+		\item Under Detours, every hook increments the \texttt{activeThreads} counter, so the drain condition is that the counter reaches zero.
+		\item Under Frida-Gum with only returning hooks, the interceptor tracks in-flight invocations itself, and \texttt{gum\_interceptor\_flush()} returning \texttt{TRUE} (no thread is still inside the interceptor's trampolines) is sufficient.
+		\item Under Frida-Gum with at least one non-returning hook, those hooks bypass the interceptor's tracking (\cref{subsec:noreturn_adaptation}), so both conditions are required.
+	\end{itemize}
+	Whenever the counter takes part in the condition, a \emph{confirmation interval} $T_{\mathrm{confirm}}$ follows before the module may be considered free.
+	The \texttt{HookActiveThreads} destructor decrements the counter just before the hook function returns, so a thread can read zero while still executing the epilogue (register restoration and the final \texttt{ret}) inside the \ac{DLL}'s pages.
+	Unmapping at that instant would fault a preempted thread, so the counter is re-read after $T_{\mathrm{confirm}}$.
+	This is a heuristic, not a proof: a thread preempted for longer than $T_{\mathrm{confirm}}$ at exactly that point would go undetected.
+	A second call after a failed drain skips the revert (the hooks are already detached) and re-runs only the drain phase, which is what makes the repeated ejection of \cref{subsec:dll_leak} possible.
 
 	\item \textbf{Destruction of Telemetry Subsystems:}
 	Only after Step~3 confirms that all worker threads have drained (\texttt{g\_Ejected == true}) the payload destroy the logging and metrics registries.
@@ -2226,13 +2333,62 @@ while (GetTickCount() - start < 2000) {
 	\item \textbf{Runtime and Resource Deallocation:}
 	The payload releases the TLS slot.
 	Under Frida-Gum, it unreferences the interceptor and shuts down embedded Frida runtime engine.
-	Finally, \texttt{DeinitializeHooks()} returns the outcome to the injector.
+	Finally, \texttt{DeinitializeHooks()} returns \texttt{0} to signal a clean drain and safe detachment to the injector, or \texttt{1} if active threads remain trapped.
 \end{enumerate}
+
+\begin{table}[H]
+	\centering
+	\small
+	\begin{tabularx}{\textwidth}{@{}l >{\RaggedRight}X l@{}}
+		\toprule
+		\textbf{Generated for} & \textbf{\textsc{Drained} Condition} & \textbf{\textit{needConfirm}} \\
+		\midrule
+		Detours & \texttt{activeThreads} $=0$ & yes \\
+		\addlinespace
+		Frida-Gum, returning hooks only & \texttt{gum\_interceptor\_flush()} & no \\
+		\addlinespace
+		Frida-Gum, $\ge 1$ non-returning hook & \texttt{gum\_interceptor\_flush()} $\wedge$ \texttt{activeThreads} $=0$ & yes \\
+		\bottomrule
+	\end{tabularx}
+	\caption{Drain condition for each engine and policy.}
+	\label{tab:drain_variants}
+\end{table}
+
+\begin{algorithm}[t]
+	\caption{\texttt{DeinitializeHooks}. \texttt{Drained} and \texttt{needConfirm} are fixed per engine and policy when the code is generated (\cref{tab:drain_variants}); they are not evaluated per call.}
+	\label{alg:deinit}
+	\begin{algorithmic}[1]
+		\Require $T_{\mathrm{drain}}=2000$\,ms, $T_{\mathrm{confirm}}=1000$\,ms, $T_{\mathrm{poll}}=50$\,ms
+		\If{\textit{ejected}} \State \Return \textsc{true} \EndIf
+		\If{\textit{hooksAttached}}
+		\State stop the metrics exposer (if configured)
+		\State revert all hooks in a single engine transaction
+		\If{the transaction failed} \State \Return \textsc{false} \EndIf
+		\State \textit{hooksAttached} $\gets$ \textsc{false}
+		\EndIf
+		\State $t_0 \gets \textsc{Now}()$
+		\While{$\textsc{Now}() - t_0 < T_{\mathrm{drain}}$}
+		\If{\textsc{Drained}}
+		\If{\textit{needConfirm}} \State sleep $T_{\mathrm{confirm}}$ \EndIf
+		\If{\textbf{not} \textit{needConfirm} \textbf{or} \textit{activeThreads} $=0$}
+		\State \textit{ejected} $\gets$ \textsc{true}
+		\State \textbf{break}
+		\EndIf
+		\EndIf
+		\State sleep $T_{\mathrm{poll}}$
+		\EndWhile
+		\If{\textit{ejected}}
+		\State destroy the metrics registry and shut down the logger (if configured)
+		\State release the engine runtime (Frida-Gum only) and free the TLS slot
+		\EndIf
+		\State \Return \textit{ejected}
+	\end{algorithmic}
+\end{algorithm}
 
 \subsubsection{Ejection-Failure DLL Leak Strategy}
 \label{subsec:dll_leak}
 
-Despite all the safety measures adopted in the ejection protocol, a persistent challenge in binary instrumentation is the problem of \emph{blocked worker threads}.
+Despite all the safety measures adopted in the ejection protocol, a persistent challenge in \ac{DBI} is the problem of \emph{blocked worker threads}.
 
 \paragraph{The Problem of Hooking Blocking Functions}
 
@@ -2244,13 +2400,13 @@ In industrial and network-connected applications, worker threads frequently exec
 \end{itemize}
 
 If an instrumentation hook intercepts a function that performs a blocking call, a worker thread may enter the hook function, call the original function via the trampoline, and remain blocked in the kernel for seconds, minutes, or hours.
-When the user initiates module ejection, Step~2 of \texttt{DeinitializeHooks()} (\cref{fig:ejection_sequence}) successfully restores the original prologue bytes.
+When the user initiates module ejection, Step~2 of \texttt{DeinitializeHooks()} (\cref{alg:deinit}) successfully restores the original prologue bytes.
 However, the blocked thread's activation frame remains frozen on its stack: its return address points directly into \texttt{Hooked<F>} inside the hook \ac{DLL}.
 
 If the injector unloads the \ac{DLL} via \texttt{FreeLibrary}, the operating system unmaps the \ac{DLL}'s code pages from the process's virtual address space.
 When the blocking call eventually returns, the worker thread attempts to resume execution at an address that is no longer mapped, triggering an unhandled Access Violation that crashes the host application.
 
-\paragraph{The Controlled Leak Defense Mechanism}
+\paragraph{The Controlled Leak Mechanism}
 
 To prevent this event, HookDesigner implements a defense coordinated between the injected \ac{DLL} and the injector utility, illustrated in \cref{fig:leak_strategy_decision_tree}:
 
@@ -2275,11 +2431,11 @@ To prevent this event, HookDesigner implements a defense coordinated between the
 			\textbf{DLL: Clean Exit}\\
 			$\bullet$ Destroy \texttt{spdlog} \& Prometheus\\
 			$\bullet$ Free TLS slot\\
-			$\bullet$ Return \texttt{TRUE} (exit code 1)
+			$\bullet$ Return 0 (success)
 		};
 		\node[success, below=0.8cm of succ_dll] (succ_inj) {
 			\textbf{Injector: Complete Unload}\\
-			$\bullet$ Detects exit code 1\\
+			$\bullet$ Detects exit code 0\\
 			$\bullet$ Calls \texttt{FreeLibrary(hRemoteModule)}\\
 			$\bullet$ DLL memory unloaded
 		};
@@ -2289,11 +2445,11 @@ To prevent this event, HookDesigner implements a defense coordinated between the
 			\textbf{DLL: Structures Preservation}\\
 			$\bullet$ Skip telemetry destruction\\
 			$\bullet$ Preserve TLS slot\\
-			$\bullet$ Return \texttt{FALSE} (exit code 0)
+			$\bullet$ Return 1 (leak warning)
 		};
 		\node[failure, below=0.8cm of fail_dll] (fail_inj) {
 			\textbf{Injector: Controlled DLL Leak}\\
-			$\bullet$ Detects exit code 0\\
+			$\bullet$ Detects exit code 1\\
 			$\bullet$ \emph{Deliberately skips \texttt{FreeLibrary}}\\
 			$\bullet$ DLL left mapped
 		};
@@ -2320,35 +2476,38 @@ To prevent this event, HookDesigner implements a defense coordinated between the
 		\item \textbf{Preserves TLS Index:} It deliberately skips releasing the allocated TLS slot: when a blocked worker thread unblocks and returns from the target API, it re-enters the hook function's post-logic, calling \texttt{hook\_recursion\_guard.Acquire()} and subsequently \texttt{Release()} inside its RAII destructor (\cref{subsec:recursion_guard}).
 		Both routines call \texttt{TlsSetValue} using \texttt{g\_TlsIndex}, if \texttt{TlsFree} had been invoked, \texttt{g\_TlsIndex} would become invalid.
 		Preserving \texttt{g\_TlsIndex} guarantees that post-execution re-entrancy tracking and RAII destructors complete safely without process corruption.
-		\item \textbf{Returns Failure Code:} It returns \texttt{FALSE} (\texttt{0}) to the injector.
+		\item \textbf{Returns Status Code:} It returns \texttt{1} (thread leak warning code) to the injector, signaling that hooks have been detached but threads remain trapped in hook routines.
 	\end{itemize}
 
 	\item \textbf{Injector -- Safety Fallback:}
 	The injector inspects the remote thread's exit code, as shown in \cref{lst:injector_eject_fallback}:
-	\begin{lstlisting}[language=C++, caption={Injector fallback logic}, label={lst:injector_eject_fallback}, basicstyle=\ttfamily\footnotesize, breaklines=true]
-DWORD deinitExitCode = 1; // Default to success (TRUE)
+	\begin{lstlisting}[language=C++, caption={Injector fallback logic in \texttt{injector.cpp}.}, label={lst:injector_eject_fallback}, basicstyle=\ttfamily\footnotesize, breaklines=true]
+DWORD deinitExitCode = (DWORD)-1;
 
 CallRemoteExport(hProcess, hRemoteModule, dllPath, "DeinitializeHooks", &deinitExitCode);
 
-if (deinitExitCode == 0) { // FALSE: DLL leak fallback
-    std::cout << "[WARNING] Skipping FreeLibrary (leaking DLL in target memory)";
-
-} else { // TRUE: Clean drain
+if (deinitExitCode == 1) { // trapped threads warning: DLL leak  fallback
+    std::cout << "[WARNING] Hooks successfully detached, but some threads remain blocked inside them.\n";
+    std::cout << "[WARNING] Skipping FreeLibrary (leaking DLL in target memory) to prevent target crash.\n";
+} else if (deinitExitCode != 0) { // Detachment error
+    std::cerr << "[ERROR] DeinitializeHooks reported error code: 0x" 
+              << std::hex << deinitExitCode << ". Skipping FreeLibrary.\n";
+} else { // Exit code 0: Clean drain confirmed
+    std::cout << "Ejecting DLL...\n";
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, 
         (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
-    
     WaitForSingleObject(hThread, INFINITE);
-    
     CloseHandle(hThread);
 }
 	\end{lstlisting}
-	If \texttt{deinitExitCode} is \texttt{0}, \texttt{injector.exe} outputs a warning and \emph{deliberately skips} calling \texttt{FreeLibrary}.
-	The hook \ac{DLL} remains mapped in the target process's virtual memory space.
+	If \texttt{deinitExitCode} is \texttt{1}, \texttt{injector.exe} outputs a warning and \emph{deliberately skips} calling \texttt{FreeLibrary}.
+	If \texttt{deinitExitCode} is any other non-zero value, an error occurred during detachment, and \texttt{FreeLibrary} is similarly bypassed to prevent unmapping unpredictable state.
+	Only when \texttt{deinitExitCode == 0} (clean thread drain confirmed) does the injector safely invoke \texttt{FreeLibrary} to unmap the \ac{DLL}.
 \end{enumerate}
 
 
 From a software engineering perspective, leaking memory is typically considered a defect.
-However, in binary instrumentation—particularly in critical industrial software—leaking a \ac{DLL} under ejection failure is a safety-oriented design decision.
+However, in \ac{DBI}—particularly in critical industrial software—leaking a \ac{DLL} under ejection failure is a safety-oriented design decision.
 
 Considering the two alternatives when ejection encounters blocked threads:
 \begin{enumerate}
@@ -2356,7 +2515,7 @@ Considering the two alternatives when ejection encounters blocked threads:
 	When the blocked thread wakes up, its return address points to deallocated memory (\texttt{MEM\_FREE}), triggering an instantaneous Access Violation, that makes crash the host process.
 	\item \textbf{Controlled Payload Leak (HookDesigner Fallback):} The module remains mapped in virtual memory.
 	Because hooks were already reverted in Step~2, no \emph{new} calls can ever enter the \ac{DLL}.
-	The memory overhead of the leaked payload is negligible (typically under 1\,MB).
+	The memory overhead of the leaked payload is ususally negligible.
 	When the blocked thread eventually unblocks, it unwinds its stack through the still-valid code pages, returns to the host application, the ejection mechanism can be repeated and the DLL can be freed.
 \end{enumerate}
 

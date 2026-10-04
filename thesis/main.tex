@@ -1,0 +1,55 @@
+\documentclass{masterthesis}
+% masterthesis for Computer Science
+% masterthesis_ceng for Computer Engineering
+% use the [nocoverpage] option to speed up compilation by skipping the cover page
+
+% the configuration is in the preamble.tex file, read it and modify it to change
+% the document appearance and included packages
+\input{preamble}
+
+% by default, we use the biblatex package to manage the bibliography
+% if you prefer to use bibtex, comment the following line and uncomment the
+% relevant lines at the end of the document
+\addbibresource{bib.bib}
+
+\input{acronyms}
+
+\begin{document}
+
+\title{Template for Master's Theses at DIBRIS}
+
+\author{Matteo Dell'Amico}
+
+% important for when you'll submit your thesis: your advisor(s) are "relatore", and the examiner is "correlatore".
+\advisor{Advisor Name}
+
+\examiner{Examiner Name}
+
+\maketitle
+
+\begin{abstract}
+This thesis proposes the design and implementation of a domain-specific language (DSL) for specifying hook-based dynamic binary instrumentation in Windows environments. The work will evaluate freely available Windows hooking libraries, select one or more as compilation targets, and assess the resulting framework for performance measurement, security policy enforcement, and runtime monitoring. Particular attention will be given to thread safety and to reliable attachment and detachment from running processes in production settings. Candidates must be fluent in x86 assembly and have passed the BASC exam.
+\end{abstract}
+
+\tableofcontents
+
+\include{introduction}
+
+\include{background}
+
+% \include{related}
+
+\include{method}
+
+\include{results}
+
+\include{conclusion}
+
+% Bibliography using biber; comment this and uncomment the following lines to use bibtex instead
+\nocite{*}
+\printbibliography
+% \bibliographystyle{alphaurl}
+% \bibliography{bib}
+
+\end{document}
+
