@@ -130,7 +130,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     }
     catch (const std::exception& ex) {
         if (in_transaction && interceptor) {
+            {% for hook in hooks %}
+            if (target_{{ hook.function_name }}) {
+                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+            }
+            {% endfor %}
             gum_interceptor_end_transaction(interceptor);
+            in_transaction = false;
         }
         if (interceptor) {
             g_object_unref(interceptor);
@@ -154,7 +160,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     }
     catch (...) {
         if (in_transaction && interceptor) {
+            {% for hook in hooks %}
+            if (target_{{ hook.function_name }}) {
+                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+            }
+            {% endfor %}
             gum_interceptor_end_transaction(interceptor);
+            in_transaction = false;
         }
         if (interceptor) {
             g_object_unref(interceptor);
@@ -256,7 +268,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
     }
     catch (const std::exception& ex) {
         if (in_transaction && interceptor) {
+            {% for hook in hooks %}
+            if (target_{{ hook.function_name }} != nullptr) {
+                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+            }
+            {% endfor %}
             gum_interceptor_end_transaction(interceptor);
+            in_transaction = false;
         }
         std::string msg = fmt::format("[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what());
         OutputDebugStringA(msg.c_str());
@@ -264,7 +282,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
     }
     catch (...) {
         if (in_transaction && interceptor) {
+            {% for hook in hooks %}
+            if (target_{{ hook.function_name }} != nullptr) {
+                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
+            }
+            {% endfor %}
             gum_interceptor_end_transaction(interceptor);
+            in_transaction = false;
         }
         OutputDebugStringA("[CRITICAL] SEH/Hardware fault in DeinitializeHooks\n");
         return 0xE0000003;
