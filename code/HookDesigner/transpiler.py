@@ -22,7 +22,7 @@ DEFAULT_ENGINES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__))
 
 # Regex Constants
 _HEX_PATTERN = re.compile(r"^0x[0-9a-f]+$", flags=re.I)
-_CALLING_CONV_PATTERN = re.compile(r"\b(__stdcall|__cdecl|__fastcall|WINAPI|APIENTRY|CALLBACK|CDECL|STDMETHODCALLTYPE|STDAPICALLTYPE)\b", flags=re.I)
+_CALLING_CONV_PATTERN = re.compile(r"\b(__stdcall|__cdecl|__fastcall|__vectorcall|WINAPI|APIENTRY|CALLBACK|CDECL|STDMETHODCALLTYPE|STDAPICALLTYPE)\b", flags=re.I)
 _SIGNATURES_BLOCK_PATTERN = re.compile(r"//\s*@signatures-start(.*?)(?://\s*@signatures-end)", flags=re.S | re.I)
 _HOOK_TAG_PATTERN = re.compile(r"//\s*@(?!signatures\b)(\w+)-start", flags=re.I)
 

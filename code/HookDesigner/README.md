@@ -623,7 +623,7 @@ Each `hook` object within `hooks` contains the fields from the YAML schema plus 
 |----------------|-------------|
 | `parameters` | List of parameter dicts (see detailed parameter key breakdown below) |
 | `return_type` | C++ return type string |
-| `calling_convention` | Detected calling convention if specified (e.g., `"__stdcall"`, `""`) |
+| `calling_convention` | Detected calling convention if specified (e.g., `"__stdcall"`, `"__vectorcall"`, `""`) |
 | `address_resolution_cpp` | Generated C++ expression for resolving the function address |
 
 #### Parameter Dictionary Fields
