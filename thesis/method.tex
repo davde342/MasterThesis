@@ -137,7 +137,7 @@ Currently, HookDesigner is only compatible with inline hooking paradigm (\cref{s
 	\item \textbf{Frida-Gum:}
 	Frida-Gum was chosen as a complementary engine to provide modern dynamic interception capabilities.
 	Only Function Replacement mode is used, because the Invocation Listener cannot read floating-point arguments on Windows x64 (\cref{subsec:frida_arch,subsec:scenario_2}).
-	This allows developers to manually handle floating-point parameter extraction bypassing Frida indexing, while retaining some of Frida's features not included in Detours/MinHook (presented in \cref{subsubsec:advantages}).
+	This allows developers to manually handle floating-point parameter extraction bypassing Frida default indexing, while retaining some of Frida's features not included in Detours/MinHook (presented in \cref{subsubsec:advantages}).
 \end{itemize}
 [MinHook was not chosen because its execution model matches Detours]
 
@@ -692,7 +692,7 @@ To assemble the complete build command, \texttt{compile\_dll()} combines the com
 \end{table}
 
 \paragraph{DLL portability}
-A key design constraint for HookDesigner is operational reliability in restricted industrial \ac{SCADA} settings.
+A key design constraint for HookDesigner is reliability in restricted industrial SCADA environment.
 
 If the instrumentation \ac{DLL} were dynamically linked against the universal CRT (\texttt{/MD}), loading the payload onto a target machine lacking the exact corresponding redistributable build would trigger a loader failure, silently failing injection.
 By enforcing static CRT linkage (\texttt{/MT}) and statically linking the hooking engine (Detours or Frida-Gum) alongside the telemetry libraries (\texttt{spdlog} and \texttt{prometheus-cpp}), the transpiler outputs a completely self-contained binary.
@@ -1569,7 +1569,7 @@ By analyzing parameter types at transpile time, the framework automatically gene
 \subsubsection{Type Analysis}
 
 As introduced in \cref{subsec:param_capture}, every parameter required for telemetry must be safely captured on function entry or exit.
-To automate this without requiring manual boilerplate from the user, the transpiler performs static type analysis on each parameter's Clang type representation (preserved from the Stage~1 in \cref{subsec:libclang_ast}).
+To automate this without requiring manual boilerplate from the user, the transpiler performs static type analysis on each parameter's Clang type representation (preserved from the Stage~2 in \cref{subsec:libclang_ast}).
 
 The analysis classifies each parameter through three conceptual phases:
 \begin{itemize}
