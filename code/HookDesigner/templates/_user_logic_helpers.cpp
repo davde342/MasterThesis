@@ -19,6 +19,28 @@ struct RecursionHookGuard {
     }
 };
 
+#include <cerrno>
+
+// RAII helper to preserve Windows system error codes (GetLastError) and CRT errno
+struct SystemErrorGuard {
+    DWORD win32_error;
+    int crt_errno;
+
+    SystemErrorGuard() : win32_error(GetLastError()), crt_errno(errno) {}
+    ~SystemErrorGuard() {
+        SetLastError(win32_error);
+        errno = crt_errno;
+    }
+    void Capture() {
+        win32_error = GetLastError();
+        crt_errno = errno;
+    }
+    void Restore() const {
+        SetLastError(win32_error);
+        errno = crt_errno;
+    }
+};
+
 static std::atomic<int> activeThreads{0};
 
 // RAII helper to track active hook execution count

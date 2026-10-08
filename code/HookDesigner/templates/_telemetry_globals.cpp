@@ -6,10 +6,6 @@
 #include "spdlog/sinks/udp_sink.h"
 {% endif %}
 
-{% if telemetry.has_execution_time %}
-static LARGE_INTEGER g_PerfFrequency = {0};
-{% endif %}
-
 
 
 {% if telemetry.metrics == "prometheus" %}

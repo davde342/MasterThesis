@@ -1,8 +1,4 @@
 
-    {% if telemetry.has_execution_time %}
-    QueryPerformanceFrequency(&g_PerfFrequency);
-    {% endif %}
-
     {% if telemetry.logger == "spdlog" %}
     spdlog::init_thread_pool(65536, 1, []() {
         if (g_TlsIndex != TLS_OUT_OF_INDEXES) {

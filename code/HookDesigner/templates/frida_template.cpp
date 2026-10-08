@@ -28,6 +28,9 @@
 static bool g_HooksAttached = false;
 static bool g_Ejected = false;
 static GumInterceptor* interceptor = nullptr;
+{% if has_execution_time %}
+static LARGE_INTEGER g_PerfFrequency = {0};
+{% endif %}
 
 {% include "_user_logic_helpers.cpp" %}
 
@@ -41,7 +44,10 @@ static gpointer target_{{ hook.function_name }} = nullptr;
 // Hook Implementations
 {% for hook in hooks %}
 {{ hook.return_type }} {% if hook.calling_convention %}{{ hook.calling_convention }} {% endif %}Hooked{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.type }} {{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%}) {
+    SystemErrorGuard system_error_guard;
+
     if (TlsGetValue(g_TlsIndex) != 0) {
+        system_error_guard.Restore();
         {% if hook.return_type == 'void' %}
         True{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
         return;
@@ -71,6 +77,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
             return 0xE0000001;
         }
 
+        {% if has_execution_time %}
+        QueryPerformanceFrequency(&g_PerfFrequency);
+        {% endif %}
         {% if telemetry %}
         {% include "_telemetry_init.cpp" %}
         {% endif %}

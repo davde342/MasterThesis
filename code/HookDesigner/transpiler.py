@@ -465,21 +465,20 @@ def process_telemetry(hook, telemetry):
     log_rules = behaviors.get("log_rules", [])
     perf = behaviors.get("performance_metrics", {})
     has_metrics = (
-        perf["execution_time"]
-        or len(perf.get("counters", [])) > 0
+        len(perf.get("counters", [])) > 0
         or len(perf.get("gauges", [])) > 0
         or len(perf.get("histograms", [])) > 0
     )
 
+    if log_rules and (not telemetry or not telemetry.get("logger")):
+        raise ValueError(f"Hook '{func_name}' specifies log_rules, but telemetry 'logger' is not configured.")
 
-    if log_rules and not telemetry:
-        raise ValueError(f"Hook '{func_name}' specifies log_rules, but telemetry is not configured.")
+    if has_metrics and (not telemetry or not telemetry.get("metrics")):
+        raise ValueError(f"Hook '{func_name}' specifies metric series (counters/gauges/histograms), but telemetry 'metrics' is not configured.")
 
-    if has_metrics and not telemetry:
-        raise ValueError(f"Hook '{func_name}' specifies performance metrics, but telemetry is not configured.")
-    
-    if perf["execution_time"] and telemetry:
-        telemetry["has_execution_time"] = True
+    if perf["execution_time"]:
+        if not telemetry or not telemetry.get("metrics"):
+            print(f"[!] Warning: Hook '{func_name}' specifies 'execution_time: true', but telemetry 'metrics' is not configured.")
 
 
     input_vars_needed = set()
@@ -529,8 +528,6 @@ def normalize_policy(data):
         if telemetry.get("metrics") and telemetry["metrics"] == "prometheus":
             metrics_cfg = telemetry.setdefault("metrics_config", {})
             metrics_cfg.setdefault("endpoint", "127.0.0.1:8080")
-
-        telemetry["has_execution_time"] = False
     else:
         config["telemetry"] = None
 
@@ -818,10 +815,16 @@ def generate_cpp_code(policy_data, engine, output_cpp_path):
 
     telemetry_config = policy_data["configure"]["telemetry"]
 
+    has_execution_time = any(
+        hook["behaviors"]["performance_metrics"]["execution_time"]
+        for hook in policy_data.get("hooks", [])
+    )
+
     rendered_code = template.render(
         hooks=policy_data["hooks"],
         logic_file_rel=logic_file_rel,
-        telemetry=telemetry_config
+        telemetry=telemetry_config,
+        has_execution_time=has_execution_time
     )
 
     os.makedirs(os.path.dirname(os.path.abspath(output_cpp_path)), exist_ok=True)
@@ -928,16 +931,20 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
         cl_args.append("ws2_32.lib")
         cl_args.append("crypt32.lib")
 
+    base_name = os.path.splitext(dll_dest)[0]
     cl_args.append("/link")
     cl_args.append(f"/OUT:{dll_dest}")
+    cl_args.append(f"/IMPLIB:{base_name}.lib")
     cl_args.append("/DEBUG")
 
     final_cmd = compile_cmd + subprocess.list2cmdline(cl_args)
     print(f"compile command for engine '{engine}':\n    {final_cmd}\n")
 
+    dest_dir = os.path.dirname(os.path.abspath(dll_dest))
     proc = subprocess.run(
         final_cmd,
         shell=True,
+        cwd=dest_dir if os.path.exists(dest_dir) else None,
         capture_output=True,
         text=True
     )

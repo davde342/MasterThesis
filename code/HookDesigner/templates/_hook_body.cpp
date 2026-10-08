@@ -56,19 +56,25 @@
     {% endif %}
     {% endif %}
 
-    {% if hook.behaviors.performance_metrics.execution_time %}
-    LARGE_INTEGER start_time_{{ hook.function_name }};
-    QueryPerformanceCounter(&start_time_{{ hook.function_name }});
-    {% endif %}
-
     hook_recursion_guard.Release();
     {% if hook.is_noreturn %}
     hook_active_threads.Release();
+    {% endif %}
+
+    system_error_guard.Restore();
+
+    {% if hook.behaviors.performance_metrics.execution_time %}
+    LARGE_INTEGER start_time_{{ hook.function_name }};
+    QueryPerformanceCounter(&start_time_{{ hook.function_name }});
     {% endif %}
     {% if hook.return_type == 'void' %}
     True{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
     {% else %}
     {{ hook.return_type }} __hook_result = True{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
+    {% endif %}
+
+    {% if not hook.is_noreturn %}
+    system_error_guard.Capture();
     {% endif %}
 
     {% if hook.behaviors.performance_metrics.execution_time %}

@@ -542,15 +542,17 @@ The top-level template for the Frida-Gum engine. Utilizes Frida's dynamic binary
 
 Generates the body of each `Hooked<FunctionName>` function wrapper. Included once per hook within a `{% for hook in hooks %}` loop. It generates:
 
-1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types or `CopyString` for string pointers). 
-2. **Performance timing start**: Queries `QueryPerformanceCounter` if `execution_time` is enabled.
-3. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks.
-4. **Original function call**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result`.
-5. **Post-hook invocation**: Calls user `post_hook` callback.
-6. **Performance timing end**: Computes elapsed milliseconds latency.
-7. **Argument capture on exit**: Re-captures parameters if referenced, in the policy, they are indicated as `output_<parameter_name>`. 
-8. **Telemetry execution**: Includes `_telemetry_body.cpp` to evaluate log rules and record metrics.
-9. **Return**: Returns `__hook_result` (or void).
+1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types or `CopyString` for string pointers).
+2. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks.
+3. **Recursion, thread, and error guard release**: Releases `hook_recursion_guard` (and `hook_active_threads` for non-returning functions) and calls `system_error_guard.Restore()` to ensure the original target function sees the pristine incoming caller error state.
+4. **Performance timing start**: Queries `QueryPerformanceCounter(&start_time_...)` immediately prior to target invocation if `execution_time` is enabled.
+5. **Original function call & error snapshot**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result` and immediately snapshotting the target's error state via `system_error_guard.Capture()`.
+6. **Performance timing end**: Queries `QueryPerformanceCounter(&end_time_...)` immediately after returning and computes elapsed milliseconds latency.
+7. **Recursion guard re-acquisition**: Re-acquires `hook_recursion_guard` to protect post-execution logic and telemetry routines from re-entrant callbacks.
+8. **Post-hook invocation**: Calls user `post_hook` callback within structured exception handling and updates `system_error_guard.Capture()` if the user callback intentionally mutated error states.
+9. **Argument capture on exit**: Re-captures parameters if referenced (`output_<parameter_name>`).
+10. **Telemetry execution**: Includes `_telemetry_body.cpp` to evaluate log rules and record Prometheus metrics (any side-effect error state modifications are safely quarantined).
+11. **Return**: Automatically restores the authentic target error state (`GetLastError()` and `errno`) upon function return via `system_error_guard`'s destructor, then returns `__hook_result` (or void).
 
 #### `_telemetry_globals.cpp` (Shared Partial)
 
@@ -565,7 +567,6 @@ Generates global pointers, headers, and helper overloads for telemetry component
 
 Generates initialization code invoked inside `InitializeHooks()`:
 
-- Initializes high-resolution timer frequency (`QueryPerformanceFrequency`).
 - Configures `spdlog` thread pool (`init_thread_pool`) and creates an asynchronous UDP Syslog sink (formatted with RFC-5424 timestamp) or basic file sink.
 - Instantiates `prometheus::Exposer` listening on the configured HTTP endpoint and registers `prometheus::Registry`.
 - Builds and registers all Prometheus metric families (`BuildCounter()`, `BuildGauge()`, `BuildHistogram()`) and adds label-less metric handles to the registry.
@@ -585,6 +586,7 @@ Provides utility functions and SEH-protected wrappers included at the top of eve
 - `#include "{{ logic_file_rel }}"` — includes the user's logic file.
 - `RecursionHookGuard` — TLS-based thread guard to prevent re-entrant hook loops.
 - `HookActiveThreads` — RAII thread tracking counter (`activeThreads`) for safe ejection.
+- `SystemErrorGuard` — RAII system error guard preserving Windows `GetLastError()` and CRT `errno` across pre/post logic, string conversions, and telemetry emissions.
 - `CopyString` — safe string copy helper using SIMD `strnlen` to inspect `char*` pointers up to a max length without crash risks; memory access violations are caught by `/EHa` structured exception handling.
 - `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null or unmapped; protected against access violations via `/EHa`structured exception .
 
@@ -605,7 +607,8 @@ All templates receive the following Jinja2 context variables:
 | `hooks` | `list[dict]` | Fully enriched list of hook objects with all normalized fields, extracted parameters, generated `address_resolution_cpp` expressions |
 | `engine` | `string` | Current engine name (e.g., `"detours"`, `"frida"`) |
 | `logic_file_rel` | `string` | Relative path from the output C++ file to the user's logic file (for `#include`) |
-| `telemetry` | `dict` | Enriched global telemetry configuration (logger framework, logger config, metrics framework, metrics config, execution timing flag) |
+| `telemetry` | `dict \| null` | Enriched global telemetry configuration (logger framework, logger config, metrics framework, metrics config) |
+| `has_execution_time` | `bool` | `true` if execution timing (`execution_time: true`) is enabled on any defined hook |
 
 The `telemetry` object contains:
 
@@ -615,7 +618,6 @@ The `telemetry` object contains:
 | `logger_config` | `dict` | Sink and log level configuration (`type`, `host`, `port`, `file`, `level`) |
 | `metrics` | `string \| null` | Configured metrics framework (e.g. `"prometheus"`, or `null`) |
 | `metrics_config` | `dict` | Metrics endpoint configuration (`endpoint`) |
-| `has_execution_time` | `bool` | `true` if execution timing is enabled on any defined hook |
 
 Each `hook` object within `hooks` contains the fields from the YAML schema plus transpiler-enriched fields:
 
