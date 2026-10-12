@@ -18,18 +18,16 @@ The core objective of HookDesigner is to eliminate the gap between \emph{policy 
 This gap is traditionally bridged by hand: a developer reads a policy document, then manually translates each requirement into engine-specific code.
 However, handcrafting instrumentation code is notoriously error-prone due to the complete virtual address space sharing between the host application and the injected payload.
 For this reason, subtle programming errors---such as dereferencing invalid parameters, or encountering race conditions in multi-threaded programs---inevitably result in unhandled crashes that terminate the entire host process.
-Moreover, managing the lifecycle of hooks, including safe runtime attachment/detachment, produces fragile, tightly coupled to a specific engine code that is difficult to audit and maintain under changing requirements.
+Moreover, managing the lifecycle of hooks, including safe runtime attachment/detachment, produces fragile, tightly coupled to a specific engine code that is difficult maintain under changing requirements.
 
-To overcome these limitations, HookDesigner introduces a novel paradigm in \ac{DBI}: \emph{declarative, multi-target transpilation}.
-In computer science, a \emph{transpiler} (or source-to-source compiler / code generator) is a program that translates an input specification or program authored in one high-level language into equivalent source code in another programming language.
+To overcome this challenge, HookDesigner implement a \emph{declarative, multi-target transpilation} process.
+In computer science, a \emph{transpiler} (or source-to-source compiler) is a program that translates an input specification or program authored in one high-level language into equivalent source code in another programming language.
 HookDesigner embodies this approach through a transpiler that automatically translates high-level, human-readable policy declarations directly into the corresponding engine-specific C++ code.
 
 HookDesigner targets the setting of \cref{ch:introduction}: Windows industrial processes for which source code is unavailable and the process cannot be restarted at will, the deployment host is often restricted (no compiler, interpreter or installer), the application is multi-threaded and latency-sensitive, and a crash of the instrumented process is unacceptable.
 
 \emph{Trust model:} Policy authors are trusted: DSL expressions are compiled into the payload, which runs with the privileges of the target.
-\cref{subsec:design_principles} derives the design principles from these requirements and records, for each, the alternative that was considered.
-
-HookDesigner addresses this challenge through five foundational design principles.
+\cref{subsec:design_principles} derives the design principles from these requirements.
 \subsection{Design Principles}
 \label{subsec:design_principles}
 
@@ -53,11 +51,10 @@ HookDesigner addresses this challenge through five foundational design principle
 	\item \textbf{High-Performance Telemetry}
 	To provide observability without damaging application responsiveness, the telemetry must introduce minimal overhead on critical execution paths.
 	HookDesigner integrates industry-standard tools for high-performance telemetry, combining asynchronous logging via \texttt{spdlog}~\cite{repo:spdlog} with lightweight metric exposition through \texttt{Prometheus}~\cite{website:prometheus,repo:prometheus-cpp}.
-	This allows payloads to collect logs and real-time performance data with negligible latency impact on the host application.
 	
 	\item \textbf{Separation of Policy from Code}
 	The instrumentation policy is expressed in a declarative YAML document that specifies \emph{which} functions are intercepted and \emph{what} behaviors are applied for each hook (logging rules, performance metrics, pre/post callbacks).
-	The callback implementations and the target function signatures are authored separately in a standard C++ source file using a comment-based tagging convention, giving policy authors full IDE support and syntax highlighting.
+	The callback implementations and the target function signatures are authored separately in a standard C++ source file, giving policy authors full IDE support and syntax highlighting.
 	This separation allows also the same logic file to be reused across different policies and different target engines.
 \end{itemize}
 
