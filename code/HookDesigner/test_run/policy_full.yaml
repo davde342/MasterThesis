@@ -3,11 +3,11 @@ configure:
   engines:
     - detours
     - frida
-  process: scada_engine.exe
+  process: target_test.exe
   logic_file: "policy_logic.cpp"
  
 hooks:
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: ParseProprietaryPacket
     address_resolution:
       strategy: offset
@@ -23,7 +23,7 @@ hooks:
       security_policy:
         pre_hook: SharedPacketPreHook
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: ParseProprietaryPacket2
     address_resolution:
       strategy: offset
@@ -39,7 +39,7 @@ hooks:
       security_policy:
         pre_hook: SharedPacketPreHook
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: LogTaskResult
     address_resolution:
       strategy: export
@@ -55,7 +55,7 @@ hooks:
         pre_hook: GenericEnterLog
         post_hook: LogTaskResult_post
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: ProcessCommandSignal
     address_resolution:
       strategy: export
@@ -71,7 +71,7 @@ hooks:
         pre_hook: ProcessCommandSignal_pre
         post_hook: ProcessCommandSignal_post
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: UpdateSensor
     address_resolution:
       strategy: offset
@@ -87,7 +87,7 @@ hooks:
       security_policy:
         pre_hook: SharedDoubleAction_pre
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: CalibrateDevice
     address_resolution:
       strategy: offset
@@ -103,7 +103,7 @@ hooks:
       security_policy:
         pre_hook: SharedDoubleAction_pre
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: ProcessDataPoint
     address_resolution:
       strategy: export
@@ -117,7 +117,7 @@ hooks:
       security_policy:
         pre_hook: ProcessDataPoint_pre
  
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: PerformCriticalTask
     address_resolution:
       strategy: export
@@ -130,7 +130,7 @@ hooks:
       security_policy:
         pre_hook: PerformCriticalTask_pre
 
-  - module: scada_engine.exe
+  - module: target_test.exe
     function_name: ProcessNestedSignal
     address_resolution:
       strategy: export

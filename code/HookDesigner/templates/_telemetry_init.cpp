@@ -17,7 +17,7 @@
     std::shared_ptr<spdlog::logger> logger = std::make_shared<spdlog::async_logger>("hook_logger", sink, spdlog::thread_pool(), spdlog::async_overflow_policy::overrun_oldest);
     {% if telemetry.logger_config.type == "udp" %}
     // Syslog format so Promtail parses it automatically
-    logger->set_pattern("<165>1 %Y-%m-%dT%H:%M:%SZ - scada_hook - - - %v", spdlog::pattern_time_type::utc);
+    logger->set_pattern("<165>1 %Y-%m-%dT%H:%M:%SZ - target_hook - - - %v", spdlog::pattern_time_type::utc);
     {% endif %}
     
     // Set log level

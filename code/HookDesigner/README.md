@@ -11,7 +11,6 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
 2. [Components](#components)
    - [Transpiler (`transpiler.py`)](#transpiler-transpilerpy)
    - [Injector (`injector.cpp`)](#injector-injectorcpp)
-   - [SCADA Engine Simulator (`scada_engine.cpp`)](#scada-engine-simulator-scada_enginecpp)
    - [Template System](#template-system)
 3. [Policy YAML Schema](#policy-yaml-schema)
    - [Telemetry & Metrics Performance Guidelines](#telemetry--metrics-performance-guidelines)
@@ -31,7 +30,6 @@ HookDesigner is a tool developed as part of a Master's thesis. It provides a dec
 HookDesigner/
 ├── transpiler.py              # Core transpiler
 ├── injector.cpp               # C++ DLL injector (inject/eject/launch modes)
-├── scada_engine.cpp           # SCADA simulator target with exported hookable functions
 ├── engines.yaml               # Engine registry: maps engine names to templates, libs, args
 ├── requirements.txt           # Python dependencies
 ├── .env.example               # Template for local environment paths (MSVC, Detours, Frida, Telemetry)
@@ -93,7 +91,7 @@ The transpiler supports three mutually exclusive operational modes:
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `policy` | `scada_policy.yaml` | Path to the policy YAML file |
+| `policy` | `policy.yaml` | Path to the policy YAML file |
 | `--output-cpp` | `generated_hook.cpp` | Destination path for the generated C++ source |
 | `--output-dll` | `generated_hook.dll` | Destination path for the compiled DLL |
 | `--arch` | `x64` | Target binary architecture (`x64` or `x86`) |
@@ -152,24 +150,7 @@ injector.exe <PID> <DLL_PATH>
 
 ---
 
-### SCADA Engine Simulator (`scada_engine.cpp`)
 
-**Purpose**: A dummy AI generated test target that simulates a very simple SCADA process with multiple exported functions of varying signatures. It serves as a realistic, reproducible hooking target for integration testing.
-
-#### Exported Functions
-
-All functions use `extern "C"` linkage and are marked `__declspec(dllexport)` and `__declspec(noinline)` to ensure they are exported by name and are not optimized away by the compiler.
-
-#### Architecture
-
-The simulator runs a multi-threaded engine loop:
-
-- **3 worker threads** each call all exported functions in a cycle with an 800ms interval.
-- Parameters are varied per cycle (e.g., alternating `complexityWeight` between 600.0 and 250.0) to trigger different code paths in the hook callbacks.
-- On startup, the simulator prints its **PID**, **base address**, and **RVA offsets** for all key functions, enabling the test pipeline to dynamically populate the policy with correct offsets.
-- The engine runs until the user presses Enter, then gracefully shuts down all worker threads.
-
----
 
 ### Template System
 
@@ -187,7 +168,7 @@ The policy YAML file is the primary input to the transpiler. It consists of two 
 |-------|------|----------|---------|-------------|
 | `paradigm` | `string` | No | *(inferred from engine)* | Hooking paradigm (e.g., `inline_hook`). If specified, validates that all engines belong to this paradigm. |
 | `engines` | `string \| list[string]` | No | `["detours"]` | One or more hooking engines to generate code for. Each engine produces a separate output file. |
-| `process` | `string` | **Yes** | — | Name of the target process executable (e.g., `scada_engine.exe`). |
+| `process` | `string` | **Yes** | — | Name of the target process executable (e.g., `target.exe`). |
 | `logic_file` | `string` | **Yes** | — | Relative path (from the policy file) to the C++ user logic file containing signatures and callbacks. |
 | `telemetry` | `object` | No | `null` | Global telemetry and metrics configuration (logging framework and Prometheus metrics exposition). |
 
@@ -246,7 +227,7 @@ A list of hook definitions. Each hook specifies a target function and its associ
 |-------|------|---------|-------------|
 | `performance_metrics` | `object` | `{}` | Performance measurement configuration. |
 | `log_rules` | `list[object]` | `[]` | Logging rules configuration. |
-| `security_policy` | `object` | `{}` | Pre-hook and post-hook callback configuration. |
+| `security_policy` | `object` | `{}` | Pre-hook and post-hook callback configuration, and the optional `on_deny` action. |
 
 ##### `performance_metrics`
 
@@ -266,7 +247,7 @@ Each metric item defined inside `counters`, `gauges`, or `histograms` supports t
 | `name` | `string` | **Yes** | — | Unique metric name identifier within the hook. |
 | `description` | `string` | No | `""` | Help string / description for the Prometheus metric family. |
 | `condition` | `string` | No | `"true"` | Boolean C++ telemetry expression evaluated to determine if the metric is updated. |
-| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `__hook_latency`, `input_<param>`, `output_<param>`, `__hook_result`, or a valid c++ variable). |
+| `value` | `string` | **Gauges & Histograms** | — | C++ telemetry expression to observe or set (e.g., `__hook_latency`, `input_<param>`, `output_<param>`, `__hook_result`, `__hook_denied`, or a valid c++ variable). |
 | `buckets` | `list[float]` | No (**Histograms**) | `[0.001, 0.005, ...]` | Upper bounds for histogram buckets. Default is `[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 50.0, 100.0, 500.0, 1000.0, 5000.0, 10000.0]`. Must be a non-empty, strictly increasing list of positive numbers. |
 | `label` | `dict[string, string]` | No | `{}` | Key-value dictionary specifying dynamic Prometheus label mapping (e.g. `{ label_key: "expression" }`). At most 1 dynamic label per metric is allowed. |
 
@@ -313,8 +294,8 @@ When designing metrics (Counters, Gauges, Histograms) for high-frequency or hot-
 | `name` | `string` | `"rule_N"` | Name identifier for the log rule (auto-generated as `rule_1`, `rule_2`, etc. if omitted). |
 | `condition` | `string` | `"true"` | Boolean C++ telemetry expression evaluated to determine if log fires. |
 | `level` | `string` | `"info"` | Log level (`trace`, `debug`, `info`, `warn`, `error`, `critical`). |
-| `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or reserved hook variables (`__hook_result`, `__hook_latency`, `__hook_tid`) to capture for auto-generated format strings. |
-| `format` | `string` | `null` | Custom log format string supporting placeholders (`{__hook_tid}` (thread id), `{__hook_latency}`, `{__hook_result}`, `{input_<param>}`, `{output_<param>}`, or any valid C++ `{variable/expression}`). |
+| `arguments` | `list[string]` | `[]` | List of parameter names (`input_<param>` or `output_<param>`) or reserved hook variables (`__hook_result`, `__hook_latency`, `__hook_tid`, `__hook_denied`) to capture for auto-generated format strings. |
+| `format` | `string` | `null` | Custom log format string supporting placeholders (`{__hook_tid}` (thread id), `{__hook_latency}`, `{__hook_result}`, `{__hook_denied}` (hooks with `on_deny`), `{input_<param>}`, `{output_<param>}`, or any valid C++ `{variable/expression}`). |
 
 ###### Ways to Specify `log_rules`
 
@@ -382,11 +363,12 @@ The transpiler validates all `log_rules` in `process_log_rules` and will raise a
 - **Argument List Rules**:
   - `arguments` must be a list of strings.
   - Arguments within a single rule must be unique (no duplicate parameter names).
-  - Every argument name must start with `input_` or `output_` matching a valid function parameter (e.g. `input_lpSubKey`), or be a reserved hook variable (`__hook_result`, `__hook_latency`, `__hook_tid`).
+  - Every argument name must start with `input_` or `output_` matching a valid function parameter (e.g. `input_lpSubKey`), or be a reserved hook variable (`__hook_result`, `__hook_latency`, `__hook_tid`, `__hook_denied`).
 - **Format String Placeholders**: Placeholders inside `format` strings can reference:
   - `{__hook_tid}` (Thread ID)
   - `{__hook_latency}` (Execution time in milliseconds)
   - `{__hook_result}` (Return value of the hooked function)
+  - `{__hook_denied}` (`true` when `on_deny` denied the call; only in hooks that declare `on_deny`)
   - `{input_<param>}` or `{output_<param>}` (Target function parameters)
   - Custom C++ expressions, struct fields (e.g. `{input_pStruct->field}`), or local variables declared in `pre_hook` / `post_hook` callbacks.
   - Placeholders support C++ format specifiers following a colon (e.g., `{input_samDesired:x}`).
@@ -411,8 +393,48 @@ When writing C++ telemetry expressions in `log_rules` (conditions, custom format
 |-------|------|---------|-------------|
 | `pre_hook` | `string \| null` | `null` | Name of the pre-hook callback function (called *before* the original function). Must be tagged with `// @<name>-start` in the logic file. |
 | `post_hook` | `string \| null` | `null` | Name of the post-hook callback function (called *after* the original function). Must be tagged with `// @<name>-start` in the logic file. |
+| `on_deny` | `object \| null` | `null` | Lets the pre-hook deny the call: the original function is not called and the declared result is returned. See below. |
 
 Pre-hook and post-hook callback parameters are automatically extracted from the logic file via `libclang`. The transpiler validates that each callback parameter name matches a parameter of the target function. Policy authors can use the `__hook_result` wildcard in telemetry conditions and log format strings (e.g. `{__hook_result}`) to reference the return value returned from non-void target functions.
+
+###### `on_deny`
+
+With `on_deny`, the pre-hook decides whether the call happens: it must return `bool`, `true` to allow the call and `false` to deny it.
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `return_value` | `string` | **Yes**, unless the function returns `void` | C++ expression of the hook's return type, returned to the caller of a denied call (e.g. `"STATUS_ACCESS_DENIED"`, `"INVALID_HANDLE_VALUE"`). Not allowed for `void` functions. |
+| `last_error` | `string` | No | C++ `DWORD` expression set as the caller's `GetLastError()` value for a denied call (e.g. `"ERROR_ACCESS_DENIED"`). For Win32 APIs that report errors through `GetLastError`; ntdll functions report through their `NTSTATUS` and need only `return_value`. |
+
+```yaml
+security_policy:
+  pre_hook: CheckFileAllowed            # bool CheckFileAllowed(POBJECT_ATTRIBUTES ObjectAttributes); true = allow
+  on_deny:
+    return_value: "STATUS_ACCESS_DENIED"
+```
+
+A **denied call**:
+- does not call the original function (`True<FunctionName>`);
+- returns `return_value`, which is also the value of `__hook_result`;
+- sets the caller's last error to `last_error` when declared, and otherwise leaves the caller's error state untouched;
+- skips the post-hook, which only makes sense after an original call;
+- reports `__hook_latency` = 0;
+- still runs telemetry (log rules and metrics), so denied calls can be logged and counted.
+
+`__hook_denied` (`bool`) is `true` for a denied call. It can be used in log rule conditions, formats and arguments, and in metric conditions and values, of hooks that declare `on_deny`, e.g. a log rule with `condition: "__hook_denied"`. Latency metrics on such hooks should use `condition: "!__hook_denied"`, so the zero latency of denied calls stays out of their distribution.
+
+**Fail-closed**: if the pre-hook throws a C++ exception or faults (SEH, caught through `/EHa`), the call is denied and the reason is reported through `OutputDebugStringA`. A pre-hook that cannot reach a verdict must not let through the call it was meant to check.
+
+**errno**: a denied call leaves errno as the caller had it. This matches the original function: Win32 and ntdll APIs never set errno, and the caller's CRT derives it from the declared error itself (for example, `fopen` maps `ERROR_ACCESS_DENIED` to `EACCES`). There is no `errno` field: with the default `/MT` runtime the hook DLL's errno is not the target's. So `on_deny` is not meant for CRT functions that report their errors only through errno.
+
+
+The transpiler rejects, naming the hook:
+- `on_deny` that is not a YAML object, or that has keys other than `return_value` and `last_error`;
+- `on_deny` without a `pre_hook`, or with a pre-hook that does not return `bool`;
+- `on_deny` on an `is_noreturn` function;
+- a missing or non-string `return_value` on a non-void function, or any `return_value` on a void one;
+- a non-string `last_error`;
+- `__hook_denied` in a hook without `on_deny`.
 
 ### Complete Example
 
@@ -542,14 +564,15 @@ The top-level template for the Frida-Gum engine. Utilizes Frida's dynamic binary
 
 Generates the body of each `Hooked<FunctionName>` function wrapper. Included once per hook within a `{% for hook in hooks %}` loop. It generates:
 
-1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types or `CopyString` for string pointers).
-2. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks.
+1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types, `CopyString` for string pointers or `CopyUnicodeString` for `PUNICODE_STRING`).
+2. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks. For hooks with `on_deny`, its `bool` result sets `__hook_denied` (`true` before the call, so a pre-hook that throws or faults denies the call: fail-closed).
+   - **Deny branch** (hooks with `on_deny` only): when `__hook_denied` is `true`, steps 3–8 are skipped. `__hook_result` is set to `on_deny.return_value`, and the caller's last error to `on_deny.last_error` when declared (by writing the guard's `win32_error`, which its destructor returns to the caller). `__hook_latency` is 0. The recursion guard stays held, since there is no original call to release it around. Telemetry (steps 9–10) runs as for allowed calls.
 3. **Recursion, thread, and error guard release**: Releases `hook_recursion_guard` (and `hook_active_threads` for non-returning functions) and calls `system_error_guard.Restore()` to ensure the original target function sees the pristine incoming caller error state.
 4. **Performance timing start**: Queries `QueryPerformanceCounter(&start_time_...)` immediately prior to target invocation if `execution_time` is enabled.
-5. **Original function call & error snapshot**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result` and immediately snapshotting the target's error state via `system_error_guard.Capture()`.
-6. **Performance timing end**: Queries `QueryPerformanceCounter(&end_time_...)` immediately after returning and computes elapsed milliseconds latency.
+5. **Original function call**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result`.
+6. **Performance timing end & error snapshot**: Queries `QueryPerformanceCounter(&end_time_...)` immediately after returning and computes elapsed milliseconds latency, then snapshots the target's error state via `system_error_guard.Capture()`. The snapshot follows the end timestamp so that the timed window contains only the original function, symmetric with step 3, where `Restore()` precedes the start timestamp. This is safe because `QueryPerformanceCounter` modifies neither `GetLastError()` nor `errno`.
 7. **Recursion guard re-acquisition**: Re-acquires `hook_recursion_guard` to protect post-execution logic and telemetry routines from re-entrant callbacks.
-8. **Post-hook invocation**: Calls user `post_hook` callback within structured exception handling and updates `system_error_guard.Capture()` if the user callback intentionally mutated error states.
+8. **Post-hook invocation**: Calls user `post_hook` callback within structured exception handling. The error state returned to the caller was captured in step 6, right after the original call, so the post-hook cannot change it.
 9. **Argument capture on exit**: Re-captures parameters if referenced (`output_<parameter_name>`).
 10. **Telemetry execution**: Includes `_telemetry_body.cpp` to evaluate log rules and record Prometheus metrics (any side-effect error state modifications are safely quarantined).
 11. **Return**: Automatically restores the authentic target error state (`GetLastError()` and `errno`) upon function return via `system_error_guard`'s destructor, then returns `__hook_result` (or void).
@@ -583,11 +606,12 @@ Generates runtime telemetry evaluation logic inside each `Hooked<FunctionName>` 
 
 Provides utility functions and SEH-protected wrappers included at the top of every generated file:
 
-- `#include "{{ logic_file_rel }}"` — includes the user's logic file.
+- `#include "{{ logic_file_rel }}"` — includes the user's logic file. It is emitted **last**, after every helper below, so user logic (helpers, pre/post hook bodies) can call `CopyString`, `CopyUnicodeString` and `ReadPointer`. A user-defined function with one of these names would therefore collide with the framework's.
 - `RecursionHookGuard` — TLS-based thread guard to prevent re-entrant hook loops.
 - `HookActiveThreads` — RAII thread tracking counter (`activeThreads`) for safe ejection.
-- `SystemErrorGuard` — RAII system error guard preserving Windows `GetLastError()` and CRT `errno` across pre/post logic, string conversions, and telemetry emissions.
+- `SystemErrorGuard` — RAII system error guard preserving Windows `GetLastError()` and CRT `errno` across pre/post logic, string conversions, and telemetry emissions. errno belongs to a CRT instance: the preservation reaches the target's errno only when the hook DLL shares the target's CRT (`--rt-link /MD` with a target that uses the shared `ucrtbase.dll`); with the default `/MT` the DLL has its own CRT, so the guard covers only the DLL's own errno, which the target never reads.
 - `CopyString` — safe string copy helper using SIMD `strnlen` to inspect `char*` pointers up to a max length without crash risks; memory access violations are caught by `/EHa` structured exception handling.
+- `CopyUnicodeString` — safe copy helper for counted NT strings (`UNICODE_STRING` layout: `Length`, `MaximumLength`, `Buffer`). The buffer is not NUL-terminated, so the length is taken from `Length` (never `wcsnlen`), capped at `maxChars` (512) and converted to UTF-8. Templated on the struct type so the shared header does not depend on `<winternl.h>`. The transpiler applies it automatically to `PUNICODE_STRING` / `PCUNICODE_STRING` (and `LSA_UNICODE_STRING`) parameters (`safe_type` = `std::string`); `UNICODE_STRING` reached through a struct (e.g. `OBJECT_ATTRIBUTES::ObjectName`) must be passed explicitly. See `experiments/registry_fidelity/logic.cpp` for `OBJECT_ATTRIBUTES` helpers kept in the user logic file.
 - `ReadPointer` — templated pointer dereference helper returning a fallback value if the pointer is null or unmapped; protected against access violations via `/EHa`structured exception .
 
 #### `_dllmain.cpp` (Shared Partial)
@@ -637,8 +661,8 @@ Each element in `hook.parameters` is a dictionary describing a function paramete
 | `name` | `string` | Parameter variable identifier in the C++ function signature |
 | `type` | `string` | Original C++ type declaration (e.g., `LPCSTR`, `int*`) |
 | `is_char_ptr` | `bool` | `true` if parameter is a C-string pointer (`char*`, `LPCSTR`, `wchar_t*`, etc.) |
-| `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)`, `CopyString(...)`, or raw parameter) |
-| `safe_type` | `string` | Appropriate C++ type for storing/logging the value (e.g., `std::string` for string pointers) |
+| `safe_read_expr` | `string` | Generated C++ expression to safely read memory (e.g., `ReadPointer(...)`, `CopyString(...)`, `CopyUnicodeString(...)` for `PUNICODE_STRING`, or raw parameter) |
+| `safe_type` | `string` | Appropriate C++ type for storing/logging the value (e.g., `std::string` for string pointers and `PUNICODE_STRING`) |
 
 ### Key Constants & Safety Bounds Rationale
 
@@ -660,9 +684,9 @@ HookDesigner relies on specific numerical constants across its templates for eje
 - **Source**: [`_telemetry_init.cpp`](templates/_telemetry_init.cpp#L7)
 - **Rationale**: When critical hooked functions execute thousands of times per second across concurrent worker threads, each invocation can potentially emit multiple `log_rules`. The asynchronous queue must absorb worst-case bursts without blocking the producing worker thread while the background worker flushes records to disk or UDP Syslog. A power of two ($2^{16}$) enables lock-free ring-buffer implementations using cheap bitmask wrapping (`index & (size - 1)`) instead of expensive modulo arithmetic.
 
-#### 5. `128` — `CopyString` Default `maxChars` Bound
-- **Source**: [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L40), [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L49)
-- **Rationale**: This is a safety bound rather than a completeness bound. It caps the worst-case cost of scanning a corrupted, or non-null-terminated string pointer on the hot execution path (SIMD `strnlen` and `wcsnlen` never inspect beyond 128 characters, regardless of buffer contents). The explicit engineering trade-off is **silent truncation**: an identifier, file path, or registry subkey (e.g., in `RegOpenKeyExA`) longer than 128 characters is truncated with no explicit indication in the emitted log.
+#### 5. `512` — `CopyString` Default `maxChars` Bound
+- **Source**: [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L62), [`_user_logic_helpers.cpp`](templates/_user_logic_helpers.cpp#L71)
+- **Rationale**: This is a safety bound rather than a completeness bound. It caps the worst-case cost of scanning a corrupted, or non-null-terminated string pointer on the hot execution path (SIMD `strnlen` and `wcsnlen` never inspect beyond 512 characters, regardless of buffer contents). A bound of 512 accommodates standard Windows file paths (`MAX_PATH` = 260), full Registry subkey hierarchies (`RegOpenKeyEx`), named pipes, and typical URLs without silent truncation, while bounding worst-case temporary heap allocation for non-null-terminated pointers to ~512 bytes (~1 KB for UTF-8 wide conversions). Any string exceeding 512 characters is silently truncated.
 
 ---
 
@@ -729,11 +753,12 @@ Frida-Gum cannot safely solve this by blindly calling `SuspendThread()` across a
 
 | Dependency | Version | Purpose |
 |------------|---------|---------|
-| **Python** | ≥ 3.8 | Transpiler runtime |
-| **MSVC** (Visual Studio Build Tools) | 2022+ | C++ compiler (`cl.exe`) |
-| **Microsoft Detours** | Latest | Inline hooking library (if using Detours engine) |
-| **Frida-Gum** (devkit) | Latest | Inline hooking library (if using Frida engine) |
-| **LLVM/Clang** | ≥ 18.0 | `libclang` shared library for signature extraction |
+| **Python** | 3.13.13 | Transpiler runtime |
+| **MSVC** (Visual Studio 18 Community) | toolset 14.50.35717 | C++ compiler (`cl.exe`) |
+| **Windows SDK** | 10.0.26100.0 | Win32 headers and system libraries |
+| **Microsoft Detours** | 4.0.1 | Inline hooking library (if using Detours engine) |
+| **Frida-Gum** (devkit) | 17.9.3 | Inline hooking library (if using Frida engine) |
+| **LLVM/Clang** | 18.1.1 | `libclang` shared library for signature extraction (the one bundled in the `libclang` pip package) |
 
 ### Environment Setup
 
@@ -762,11 +787,6 @@ Frida-Gum cannot safely solve this by blindly calling `SuspendThread()` across a
 
    # LLVM/Clang libclang Path
    LIBCLANG_PATH=C:\Program Files\LLVM\bin
-   ```
-
-3. **Compile the SCADA simulator** (for simple testing):
-   ```bat
-   build_engine.bat
    ```
 
 4. **Compile the injector** (using a Developer Command Prompt for VS):
@@ -866,7 +886,7 @@ injector32.exe inject <PID> hook32.dll
 
 **Launch a new process with injection**:
 ```cmd
-injector64.exe launch scada_engine.exe hook.dll
+injector64.exe launch target.exe hook.dll
 ```
 
 **Eject a previously injected DLL**:
@@ -890,29 +910,30 @@ Future work focuses on extending HookDesigner to support **Dynamic Binary Instru
 
 | Package | Version | Purpose |
 |---------|---------|---------|
-| `jinja2` | ≥ 3.0.0 | Template engine for C++ code generation |
-| `pyyaml` | ≥ 6.0 | YAML parser for policy files and engine registry |
-| `python-dotenv` | ≥ 1.0.0 | `.env` file loading for environment path configuration |
-| `clang` | ≥ 18.0.0 | Python bindings for `libclang` AST traversal |
-| `libclang` | ≥ 18.0.0 | LLVM/Clang shared library for C++ signature extraction |
+| `jinja2` | 3.1.6 | Template engine for C++ code generation |
+| `pyyaml` | 6.0.3 | YAML parser for policy files and engine registry |
+| `python-dotenv` | 1.2.2 | `.env` file loading for environment path configuration |
+| `clang` | 18.1.8 | Python bindings for `libclang` AST traversal |
+| `libclang` | 18.1.1 | LLVM/Clang shared library for C++ signature extraction |
 
 ### C++ Dependencies
 
-| Library | Purpose | Required For |
-|---------|---------|-------------|
-| **Microsoft Detours** | Inline function hooking (transactional API) | Detours engine |
-| **Frida-Gum** (C devkit) | Inline function hooking (`GumInterceptor` API) | Frida engine |
-| **spdlog** | High-performance asynchronous logging (file & UDP Syslog) | Telemetry logger |
-| **prometheus-cpp** | Prometheus HTTP metric exposition (counters, gauges, histograms) | Telemetry metrics |
-| **fmt** | String formatting library for logs and debug output | Telemetry logger |
-| **Windows SDK & System Libs** | Win32 APIs, Sockets (`ws2_32.lib`), Crypto (`crypt32.lib`), RPC (`Rpcrt4.lib`) | All components |
-| **MSVC C++ Runtime** | Standard library, `/EHa` SEH support | All components |
+| Library | Version | Purpose | Required For |
+|---------|---------|---------|-------------|
+| **Microsoft Detours** | 4.0.1 | Inline function hooking (transactional API) | Detours engine |
+| **Frida-Gum** (C devkit) | 17.9.3 | Inline function hooking (`GumInterceptor` API) | Frida engine |
+| **spdlog** | 1.17.0 | High-performance asynchronous logging (file & UDP Syslog) | Telemetry logger |
+| **prometheus-cpp** | 1.3.0 (+45 commits, `458deac`) | Prometheus HTTP metric exposition (counters, gauges, histograms) | Telemetry metrics |
+| **civetweb** (bundled with prometheus-cpp) | 1.16 | HTTP server behind the Prometheus exposer | Telemetry metrics |
+| **fmt** (bundled with spdlog) | 12.1.0 | String formatting library for logs and debug output | Telemetry logger |
+| **Windows SDK & System Libs** | 10.0.26100.0 | Win32 APIs, Sockets (`ws2_32.lib`), Crypto (`crypt32.lib`), RPC (`Rpcrt4.lib`) | All components |
+| **MSVC C++ Runtime** | toolset 14.50.35717 | Standard library, `/EHa` SEH support | All components |
 
 ### Build Tools
 
-| Tool | Purpose |
-|------|---------|
-| **MSVC `cl.exe`** | C++ compiler for DLL generation |
-| **`vcvars64.bat`** | Sets up the MSVC 64-bit build environment |
+| Tool | Version | Purpose |
+|------|---------|---------|
+| **MSVC `cl.exe`** | toolset 14.50.35717 (Visual Studio 18 Community) | C++ compiler for DLL generation |
+| **`vcvars64.bat`** | Visual Studio 18 Community | Sets up the MSVC 64-bit build environment |
 
 ---

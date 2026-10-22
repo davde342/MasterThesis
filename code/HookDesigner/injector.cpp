@@ -4,6 +4,8 @@
 #include <vector>
 #include <tlhelp32.h>
 
+#pragma comment(lib, "advapi32.lib") // RegOpenKeyExW / RegCloseKey (attach marker)
+
 HMODULE GetDllBase(DWORD pid, const char* moduleName) {
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
@@ -22,6 +24,34 @@ HMODULE GetDllBase(DWORD pid, const char* moduleName) {
     }
     CloseHandle(hSnapshot);
     return hModule;
+}
+
+// helper: quote one argument so that CommandLineToArgvW / the MSVC CRT parse it back to the same string
+// (the inverse of the standard Windows rules: backslashes only matter in front of a quote)
+std::string QuoteArg(const std::string& arg) {
+    if (!arg.empty() && arg.find_first_of(" \t\n\v\"") == std::string::npos) {
+        return arg;
+    }
+    std::string out = "\"";
+    for (size_t i = 0; i < arg.size(); ++i) {
+        size_t backslashes = 0;
+        while (i < arg.size() && arg[i] == '\\') {
+            ++backslashes;
+            ++i;
+        }
+        if (i == arg.size()) {
+            out.append(backslashes * 2, '\\'); // trailing backslashes must not escape the closing quote
+            break;
+        }
+        if (arg[i] == '"') {
+            out.append(backslashes * 2 + 1, '\\'); // escape the backslashes and the quote itself
+        } else {
+            out.append(backslashes, '\\');
+        }
+        out += arg[i];
+    }
+    out += '"';
+    return out;
 }
 
 //helper: extract the raw filename from a full file path
@@ -111,6 +141,24 @@ bool InjectDll(HANDLE hProcess, const std::string& dllPath) {
     return true;
 }
 
+// helper: attach marker for kernel-side comparisons (e.g. ProcMon). When HOOKDESIGNER_ATTACH_MARKER=1,
+// open a non-existent HKCU key whose name carries the target PID right after InitializeHooks has returned.
+// A kernel registry monitor records it as one RegOpenKey (NAME NOT FOUND) row of the injector process, which
+// marks in its global event order the point from which the target's calls go through the installed hooks.
+void EmitAttachMarker(DWORD targetPid) {
+    char flag[8];
+    DWORD len = GetEnvironmentVariableA("HOOKDESIGNER_ATTACH_MARKER", flag, sizeof(flag));
+    if (len == 0 || std::string(flag) != "1") {
+        return;
+    }
+    std::wstring subKey = L"Software\\HookDesignerAttachMarker_" + std::to_wstring(targetPid);
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, subKey.c_str(), 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        RegCloseKey(hKey); // the key is not expected to exist, but never leak the handle
+    }
+    std::cout << "Attach marker: HKCU\\Software\\HookDesignerAttachMarker_" << targetPid << "\n";
+}
+
 bool ResolveAndValidateDll(std::string& dllPath) {
     char fullPath[MAX_PATH];
     DWORD retval = GetFullPathNameA(dllPath.c_str(), MAX_PATH, fullPath, nullptr);
@@ -198,7 +246,7 @@ int main(int argc, char* argv[]) {
         std::string cmdLine = "\"" + exePath + "\"";
         for (int i = 4; i < argc; ++i) {
             cmdLine += " ";
-            cmdLine += argv[i];
+            cmdLine += QuoteArg(argv[i]); // argv[] is already unquoted: re-quote so spaces survive
         }
 
         std::vector<char> cmdBuffer(cmdLine.begin(), cmdLine.end());
@@ -259,6 +307,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
+        // Main thread still suspended: every target call recorded after the marker goes through the hooks
+        EmitAttachMarker(pi.dwProcessId);
+
         std::cout << "Hooks successfully initialized. Resuming main thread...\n";
         ResumeThread(pi.hThread);
         CloseHandle(pi.hThread);
@@ -314,6 +365,7 @@ int main(int argc, char* argv[]) {
         }
 
         std::cout << "Hooks successfully initialized in target process.\n";
+    
     } else if (mode == "eject") {
         HMODULE hRemoteModule = GetAndValidateDllBase(pid, dllPath);
         if (!hRemoteModule) {

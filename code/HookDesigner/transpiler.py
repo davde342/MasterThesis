@@ -22,14 +22,17 @@ DEFAULT_ENGINES_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__))
 
 # Regex Constants
 _HEX_PATTERN = re.compile(r"^0x[0-9a-f]+$", flags=re.I)
-_CALLING_CONV_PATTERN = re.compile(r"\b(__stdcall|__cdecl|__fastcall|__vectorcall|WINAPI|APIENTRY|CALLBACK|CDECL|STDMETHODCALLTYPE|STDAPICALLTYPE)\b", flags=re.I)
+_CALLING_CONV_PATTERN = re.compile(r"\b(__stdcall|__cdecl|__fastcall|__vectorcall|WINAPI|APIENTRY|CALLBACK|CDECL|STDMETHODCALLTYPE|STDAPICALLTYPE|NTAPI)\b", flags=re.I)
 _SIGNATURES_BLOCK_PATTERN = re.compile(r"//\s*@signatures-start(.*?)(?://\s*@signatures-end)", flags=re.S | re.I)
 _HOOK_TAG_PATTERN = re.compile(r"//\s*@(?!signatures\b)(\w+)-start", flags=re.I)
 
 PLACEHOLDER_RE = re.compile(r"\{([a-zA-Z0-9_\.\->\(\)]+)(:[^}]+)?\}")
 _VAR_RE = re.compile(r"\b(input|output)_([a-zA-Z0-9_]+)\b")
 
-KNOWN_NORETURN = {'RaiseException', 'ExitProcess', 'ExitThread'}
+CHAR_POINTER_TYPES = {"char", "const char", "wchar_t", "const wchar_t"}
+UNICODE_STRING_RECORDS = {"_UNICODE_STRING", "UNICODE_STRING", "_LSA_UNICODE_STRING", "LSA_UNICODE_STRING"}
+
+KNOWN_NORETURN ={'RaiseException', 'ExitProcess', 'ExitThread'}
 
 # Prometheus metrics
 METRIC_CONFIGS = {
@@ -52,6 +55,7 @@ CPP_PREAMBLE = """
 #define CDECL __cdecl
 #define STDMETHODCALLTYPE __stdcall
 #define STDAPICALLTYPE __stdcall
+#define NTAPI __stdcall
 """
 
 
@@ -131,21 +135,30 @@ def analyze_type(clang_type, name):
     underlying_spelling = curr.spelling
     raw_type_spelling = clang_type.spelling
     
-    is_char_ptr = False
-    if depth == 1:
-        if curr.spelling in ("char", "const char", "wchar_t", "const wchar_t"):
-            is_char_ptr = True
+    
 
-    is_deref = (
-        "void" not in underlying_spelling.lower() and
-        not underlying_spelling.startswith("struct ") and
-        not underlying_spelling.startswith("union ")
+    is_char_ptr = (
+        depth == 1
+        and curr.spelling in CHAR_POINTER_TYPES
+    )
+
+    is_unicode_string_ptr = (
+        depth == 1
+        and curr.get_declaration().spelling in UNICODE_STRING_RECORDS
+    )
+
+    is_deref = curr.kind not in (
+        clang.cindex.TypeKind.VOID,
+        clang.cindex.TypeKind.RECORD,
     )
 
     expr = name
 
     if is_char_ptr:
         expr = f"CopyString({name})"
+        safe_type = "std::string"
+    elif is_unicode_string_ptr:
+        expr = f"CopyUnicodeString({name})"
         safe_type = "std::string"
     elif depth == 0 or not is_deref:
         safe_type = raw_type_spelling
@@ -234,7 +247,10 @@ def parse_hook_implementations(combined_content, tu):
             loc = node.location
             if loc.file and loc.file.name == 'logic_file.cpp':
                 if node.spelling in expected_hooks:
-                    hooks_map[node.spelling] = [arg.spelling for arg in node.get_arguments()]
+                    hooks_map[node.spelling] = {
+                        "params": [arg.spelling for arg in node.get_arguments()],
+                        "return_type": node.result_type.spelling,
+                    }
     #check if we found all of them
     missing = expected_hooks - set(hooks_map.keys())
     if missing:
@@ -282,8 +298,12 @@ def translate_telemetry_expr(expr, hook, input_vars_needed, output_vars_needed):
             raise ValueError(f"Cannot reference '__hook_result' for void function '{func_name}'.")
         if is_noreturn:
             raise ValueError(f"Cannot reference '__hook_result' for noreturn function '{func_name}'.")
-    
-    # 4. Parameter reference variable registration
+
+    # 4. Validate __hook_denied: the deny verdict exists only in hooks that declare on_deny
+    if re.search(r"\b__hook_denied\b", expr) and hook["behaviors"]["security_policy"]["on_deny"] is None:
+        raise ValueError(f"Cannot reference '__hook_denied' in '{func_name}': the hook does not declare 'on_deny'.")
+
+    # 5. Parameter reference variable registration
     for var_match in _VAR_RE.finditer(expr):
         prefix = var_match.group(1)
         root_param_name = var_match.group(2)
@@ -353,12 +373,12 @@ def process_log_rules(hook, input_vars_needed, output_vars_needed):
                         raise ValueError(f"Duplicate argument '{arg}' in log rule '{name}' of '{func_name}'.")
                     arg_names.add(arg)
                     
-                    if arg == "__hook_result":
+                    if arg in ("__hook_result", "__hook_denied"):
                         full_name = arg
                     else:
                         var_match = _VAR_RE.search(arg)
                         if not var_match:
-                            raise ValueError(f"Log rule '{name}' argument '{arg}' in '{func_name}' must use 'input_' or 'output_' prefix (e.g. 'input_{arg}') or be '__hook_result'")
+                            raise ValueError(f"Log rule '{name}' argument '{arg}' in '{func_name}' must use 'input_' or 'output_' prefix (e.g. 'input_{arg}') or be '__hook_result' or '__hook_denied'")
                         full_name = var_match.group(0)
                     fmt_parts.append(f"{arg}={{{full_name}}}")
                 fmt = " | ".join(fmt_parts)
@@ -568,6 +588,7 @@ def normalize_policy(data):
         sec_policy.setdefault("post_hook", None)
         sec_policy.setdefault("pre_hook_params", [])
         sec_policy.setdefault("post_hook_params", [])
+        sec_policy.setdefault("on_deny", None)
 
 def handle_logic_file(data, policy_dir):
     config = data["configure"]
@@ -619,7 +640,8 @@ def handle_logic_file(data, policy_dir):
                 raise ValueError(f"Hook '{func_name}' security_policy 'pre_hook' must be a string.")
             if pre_hook_name not in hooks_map:
                 raise ValueError(f"Pre-hook function '{pre_hook_name}' not found in logic_file.")
-            sec_policy["pre_hook_params"] = hooks_map[pre_hook_name]
+            sec_policy["pre_hook_params"] = hooks_map[pre_hook_name]["params"]
+            sec_policy["pre_hook_return_type"] = hooks_map[pre_hook_name]["return_type"]
 
         post_hook_name = sec_policy["post_hook"]
         if post_hook_name is not None:
@@ -627,7 +649,40 @@ def handle_logic_file(data, policy_dir):
                 raise ValueError(f"Hook '{func_name}' security_policy 'post_hook' must be a string.")
             if post_hook_name not in hooks_map:
                 raise ValueError(f"Post-hook function '{post_hook_name}' implementation block (with // @{post_hook_name}-start tag) not found in logic_file.")
-            sec_policy["post_hook_params"] = hooks_map[post_hook_name]
+            sec_policy["post_hook_params"] = hooks_map[post_hook_name]["params"]
+
+def validate_on_deny(hook):
+    func_name = hook["function_name"]
+    sec_policy = hook["behaviors"]["security_policy"]
+    on_deny = sec_policy["on_deny"]
+    if on_deny is None:
+        return
+
+    if not isinstance(on_deny, dict):
+        raise ValueError(f"Hook '{func_name}' security_policy 'on_deny' must be a YAML object.")
+    unknown = set(on_deny) - {"return_value", "last_error"}
+    if unknown:
+        raise ValueError(f"Hook '{func_name}' 'on_deny' has unknown keys {sorted(unknown)}; allowed: 'return_value', 'last_error'.")
+
+    pre_hook_name = sec_policy["pre_hook"]
+    if pre_hook_name is None:
+        raise ValueError(f"Hook '{func_name}' specifies 'on_deny' but no 'pre_hook': the pre-hook's verdict decides when to deny.")
+    pre_hook_return_type = sec_policy.get("pre_hook_return_type")
+    if pre_hook_return_type != "bool":
+        raise ValueError(f"Pre-hook '{pre_hook_name}' of hook '{func_name}' must return 'bool' (true = allow) when 'on_deny' is set, but returns '{pre_hook_return_type}'.")
+    if hook["is_noreturn"]:
+        raise ValueError(f"Hook '{func_name}' is marked as noreturn and cannot specify 'on_deny'.")
+
+    return_value = on_deny.setdefault("return_value", None)
+    if hook["return_type"] == "void":
+        if return_value is not None:
+            raise ValueError(f"Hook '{func_name}' returns void: 'on_deny' cannot specify a 'return_value'.")
+    elif not isinstance(return_value, str) or not return_value.strip():
+        raise ValueError(f"Hook '{func_name}' 'on_deny' requires a 'return_value' string: a C++ expression of type '{hook['return_type']}'.")
+
+    last_error = on_deny.setdefault("last_error", None)
+    if last_error is not None and (not isinstance(last_error, str) or not last_error.strip()):
+        raise ValueError(f"Hook '{func_name}' 'on_deny' 'last_error' must be a non-empty string (a C++ DWORD expression, e.g. ERROR_ACCESS_DENIED).")
 
 def validate_policy(data):
     config = data["configure"]
@@ -712,6 +767,7 @@ def validate_policy(data):
                 raise ValueError(f"Hook '{func_name}' uses strategy 'offset' but 'rva_offset' is not a valid hex string.")
 
 
+        validate_on_deny(hook)
         process_telemetry(hook, config.get("telemetry"))
 
         sec_policy = hook["behaviors"]["security_policy"]
@@ -882,10 +938,11 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
         rt_flag,      
         "/EHa",       
         "/O2",        
-        "/Zi",
+        #"/Zi",
         "/FS",
-        f'/Fd:{os.path.splitext(dll_dest)[0]}.pdb',
+        #f'/Fd:{os.path.splitext(dll_dest)[0]}.pdb',
         "/utf-8",
+        "/INCREMENTAL:NO",
         "/std:c++17", 
         f'/Fo{os.path.splitext(dll_dest)[0]}.obj',
         cpp_source,
@@ -935,7 +992,7 @@ def compile_dll(args, engine, cpp_source, dll_dest, policy_data=None):
     cl_args.append("/link")
     cl_args.append(f"/OUT:{dll_dest}")
     cl_args.append(f"/IMPLIB:{base_name}.lib")
-    cl_args.append("/DEBUG")
+    #cl_args.append("/DEBUG")
 
     final_cmd = compile_cmd + subprocess.list2cmdline(cl_args)
     print(f"compile command for engine '{engine}':\n    {final_cmd}\n")
@@ -977,7 +1034,7 @@ def get_output_paths(engine, output_cpp, output_dll, use_suffix=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Policy DSL Source-to-Source Transpiler")
-    parser.add_argument("policy", nargs="?", default="scada_policy.yaml", help="Path to the policy DSL file")
+    parser.add_argument("policy", nargs="?", default="policy_full.yaml", help="Path to the policy DSL file")
     parser.add_argument("--output-cpp", default="generated_hook.cpp", help="Destination path of generated C++ code")
     parser.add_argument("--output-dll", default="generated_hook.dll", help="Destination path of compiled Windows DLL")
     parser.add_argument("--arch", choices=["x64", "x86"], default="x64", help="Target binary architecture: x64 (default) or x86")

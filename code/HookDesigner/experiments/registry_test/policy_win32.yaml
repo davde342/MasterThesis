@@ -1,0 +1,207 @@
+configure:
+  paradigm: inline_hook
+  engines:
+    - detours
+  process: "registry_target.exe"
+  logic_file: "logic_win32.cpp"
+  telemetry:
+    logger: "spdlog"
+    logger_config:
+      type: "file"
+      file: "registry_hook.log"
+      level: "info"
+
+hooks:
+  # 1. KEY OPEN, CREATE, AND CLOSE
+  - module: advapi32.dll
+    function_name: RegOpenKeyExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "open_w"
+          format: "EVENT|RegOpenKeyExW|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|sam=0x{input_samDesired:x}|out=0x{(uintptr_t)ReadPointer(output_phkResult):x}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegOpenKeyExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "open_a"
+          format: "EVENT|RegOpenKeyExA|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|sam=0x{input_samDesired:x}|out=0x{(uintptr_t)ReadPointer(output_phkResult):x}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegCreateKeyExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "create_w"
+          format: "EVENT|RegCreateKeyExW|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|out=0x{(uintptr_t)ReadPointer(output_phkResult):x}|disposition={output_lpdwDisposition}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegCreateKeyExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "create_a"
+          format: "EVENT|RegCreateKeyExA|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|out=0x{(uintptr_t)ReadPointer(output_phkResult):x}|disposition={output_lpdwDisposition}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegCloseKey
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "close"
+          format: "EVENT|RegCloseKey|hKey=0x{(uintptr_t)input_hKey:x}|status={__hook_result}"
+
+  # 2. VALUE READ, WRITE, AND DELETE
+  - module: advapi32.dll
+    function_name: RegQueryValueExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "query_val_w"
+          format: "EVENT|RegQueryValueExW|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|type={output_lpType}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegQueryValueExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "query_val_a"
+          format: "EVENT|RegQueryValueExA|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|type={output_lpType}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegSetValueExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "set_val_w"
+          format: "EVENT|RegSetValueExW|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|type={input_dwType}|cbData={input_cbData}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegSetValueExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "set_val_a"
+          format: "EVENT|RegSetValueExA|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|type={input_dwType}|cbData={input_cbData}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegDeleteValueW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_val_w"
+          format: "EVENT|RegDeleteValueW|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegDeleteValueA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_val_a"
+          format: "EVENT|RegDeleteValueA|hKey=0x{(uintptr_t)input_hKey:x}|valName={input_lpValueName}|status={__hook_result}"
+
+  # 3. KEY DELETION (STANDARD & EXTENDED WOW64)
+  - module: advapi32.dll
+    function_name: RegDeleteKeyW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_key_w"
+          format: "EVENT|RegDeleteKeyW|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegDeleteKeyA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_key_a"
+          format: "EVENT|RegDeleteKeyA|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegDeleteKeyExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_key_ex_w"
+          format: "EVENT|RegDeleteKeyExW|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|sam=0x{input_samDesired:x}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegDeleteKeyExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "del_key_ex_a"
+          format: "EVENT|RegDeleteKeyExA|hKey=0x{(uintptr_t)input_hKey:x}|subKey={input_lpSubKey}|sam=0x{input_samDesired:x}|status={__hook_result}"
+
+  
+  # 4. METADATA & ENUMERATION
+  - module: advapi32.dll
+    function_name: RegQueryInfoKeyW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "query_info_w"
+          format: "EVENT|RegQueryInfoKeyW|hKey=0x{(uintptr_t)input_hKey:x}|subKeys={output_lpcSubKeys}|vals={output_lpcValues}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegQueryInfoKeyA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "query_info_a"
+          format: "EVENT|RegQueryInfoKeyA|hKey=0x{(uintptr_t)input_hKey:x}|subKeys={output_lpcSubKeys}|vals={output_lpcValues}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegEnumKeyExW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "enum_key_w"
+          format: "EVENT|RegEnumKeyExW|hKey=0x{(uintptr_t)input_hKey:x}|index={input_dwIndex}|name={output_lpName}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegEnumKeyExA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "enum_key_a"
+          format: "EVENT|RegEnumKeyExA|hKey=0x{(uintptr_t)input_hKey:x}|index={input_dwIndex}|name={output_lpName}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegEnumValueW
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "enum_val_w"
+          format: "EVENT|RegEnumValueW|hKey=0x{(uintptr_t)input_hKey:x}|index={input_dwIndex}|name={output_lpValueName}|type={output_lpType}|status={__hook_result}"
+
+  - module: advapi32.dll
+    function_name: RegEnumValueA
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "enum_val_a"
+          format: "EVENT|RegEnumValueA|hKey=0x{(uintptr_t)input_hKey:x}|index={input_dwIndex}|name={output_lpValueName}|type={output_lpType}|status={__hook_result}"

@@ -2,9 +2,17 @@ build_compilation_commands.txt
 
 /build/
 /build-*/
+code/HookDesigner/experiments/file_deny/build
+code/HookDesigner/experiments/file_deny/results
+code/HookDesigner/experiments/registry_conflict/build
+code/HookDesigner/experiments/registry_conflict/results
+code/HookDesigner/experiments/registry_test/build
+code/HookDesigner/experiments/registry_test/results
+code/HookDesigner/benchmarks/bin
+code/HookDesigner/benchmarks/generated
+code/HookDesigner/benchmarks/results
 /out/
 /bin/
-images/
 scratch/
 venv/
 .venv/

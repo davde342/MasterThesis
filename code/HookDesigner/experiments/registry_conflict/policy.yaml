@@ -1,0 +1,49 @@
+configure:
+  paradigm: inline_hook
+  engines:
+    - detours
+  process: "guardrail_target.exe"
+  logic_file: "logic.cpp"
+  telemetry:
+    logger: "spdlog"
+    logger_config:
+      type: "file"
+      file: "hook.log"
+      level: "info"
+
+hooks:
+  - module: ntdll.dll
+    function_name: NtOpenKey
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "redirect"
+          condition: "input_ObjectAttributes != output_ObjectAttributes"
+          format: "EVENT|redirect|fn=NtOpenKey|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|from={CopyObjectName(input_ObjectAttributes)}|to={CopyObjectName(output_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}"
+      security_policy:
+        pre_hook: RedirectSharedKey
+
+  - module: ntdll.dll
+    function_name: NtOpenKeyEx
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "redirect"
+          condition: "input_ObjectAttributes != output_ObjectAttributes"
+          format: "EVENT|redirect|fn=NtOpenKeyEx|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|from={CopyObjectName(input_ObjectAttributes)}|to={CopyObjectName(output_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}"
+      security_policy:
+        pre_hook: RedirectSharedKey
+
+  - module: ntdll.dll
+    function_name: NtCreateKey
+    address_resolution:
+      strategy: export
+    behaviors:
+      log_rules:
+        - name: "redirect"
+          condition: "input_ObjectAttributes != output_ObjectAttributes"
+          format: "EVENT|redirect|fn=NtCreateKey|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|from={CopyObjectName(input_ObjectAttributes)}|to={CopyObjectName(output_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}"
+      security_policy:
+        pre_hook: RedirectSharedKey
