@@ -1,19 +1,21 @@
-static DWORD g_TlsIndex = TLS_OUT_OF_INDEXES;
+// Per-thread re-entrancy flag. It must keep a constant initializer: in a DLL loaded with LoadLibrary,
+// dynamic initialization of a thread_local does not run on the threads that already exist.
+static thread_local bool t_InHook = false;
 
 // RAII helper to prevent recursive hook execution on the same thread
-struct RecursionHookGuard {
+struct ReEntrancyHookGuard {
     bool active;
-    RecursionHookGuard() : active(false) { Acquire(); }
-    ~RecursionHookGuard() { Release(); }
+    ReEntrancyHookGuard() : active(false) { Acquire(); }
+    ~ReEntrancyHookGuard() { Release(); }
     void Acquire() {
         if (!active) {
-            TlsSetValue(g_TlsIndex, (LPVOID)1);
+            t_InHook = true;
             active = true;
         }
     }
     void Release() {
         if (active) {
-            TlsSetValue(g_TlsIndex, (LPVOID)0);
+            t_InHook = false;
             active = false;
         }
     }

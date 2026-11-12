@@ -2,28 +2,24 @@
 #include <iostream>
 #include <string>
 #include <vector>
-#include <tlhelp32.h>
 
 #pragma comment(lib, "advapi32.lib") // RegOpenKeyExW / RegCloseKey (attach marker)
 
-HMODULE GetDllBase(DWORD pid, const char* moduleName) {
-    HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid);
-    if (hSnapshot == INVALID_HANDLE_VALUE) {
+// ASLR bypass: assume the DLL has the same base in the injector and in the target, so an address
+// read from a local copy is also valid in the target. Returns the module base, or the address of
+// exportName when one is given.
+LPVOID GetAslrRemoteAddress(const std::string& localDllPath, const char* exportName = nullptr) {
+    HMODULE hLocalMod = LoadLibraryExA(localDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
+    if (!hLocalMod) {
+        std::cerr << "Error: Failed to load DLL \"" << localDllPath << "\" locally. Error: " << GetLastError() << "\n";
         return NULL;
     }
-    MODULEENTRY32 me;
-    me.dwSize = sizeof(me);
-    HMODULE hModule = NULL;
-    if (Module32First(hSnapshot, &me)) {
-        do {
-            if (_stricmp(me.szModule, moduleName) == 0) {
-                hModule = (HMODULE)me.modBaseAddr;
-                break;
-            }
-        } while (Module32Next(hSnapshot, &me));
+    LPVOID address = exportName ? (LPVOID)GetProcAddress(hLocalMod, exportName) : (LPVOID)hLocalMod;
+    if (!address) {
+        std::cerr << "Error: Export \"" << exportName << "\" not found in DLL.\n";
     }
-    CloseHandle(hSnapshot);
-    return hModule;
+    FreeLibrary(hLocalMod); // the target holds the DLL loaded, so this base stays pinned for this boot
+    return address;
 }
 
 // helper: quote one argument so that CommandLineToArgvW / the MSVC CRT parse it back to the same string
@@ -54,32 +50,12 @@ std::string QuoteArg(const std::string& arg) {
     return out;
 }
 
-//helper: extract the raw filename from a full file path
-std::string GetFilename(const std::string& path) {
-    size_t lastSlash = path.find_last_of("\\/");
-    if (lastSlash == std::string::npos) { //it means no slash was found, so the path is already the filename
-        return path;
-    }
-    return path.substr(lastSlash + 1);
-}
 
-bool CallRemoteExport(HANDLE hProcess, HMODULE hRemoteModule, const std::string& localDllPath, const std::string& exportName, DWORD* outExitCode = nullptr) {
-    HMODULE hLocalMod = LoadLibraryExA(localDllPath.c_str(), NULL, DONT_RESOLVE_DLL_REFERENCES);
-    if (!hLocalMod) {
-        std::cerr << "Error: Failed to load DLL \"" << localDllPath << "\" locally. Error: " << GetLastError() << "\n";
+bool CallRemoteExport(HANDLE hProcess, const std::string& localDllPath, const std::string& exportName, DWORD* outExitCode = nullptr) {
+    LPVOID pRemoteFunc = GetAslrRemoteAddress(localDllPath, exportName.c_str());
+    if (!pRemoteFunc) {
         return false;
     }
-
-    FARPROC pLocalFunc = GetProcAddress(hLocalMod, exportName.c_str());
-    if (!pLocalFunc) {
-        std::cerr << "Error: Export \"" << exportName << "\" not found in DLL.\n";
-        FreeLibrary(hLocalMod);
-        return false;
-    }
-
-    DWORD_PTR offset = (DWORD_PTR)pLocalFunc - (DWORD_PTR)hLocalMod;
-    LPVOID pRemoteFunc = (LPVOID)((DWORD_PTR)hRemoteModule + offset);
-    FreeLibrary(hLocalMod);
 
     HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pRemoteFunc, NULL, 0, NULL);
     if (!hThread) {
@@ -93,15 +69,6 @@ bool CallRemoteExport(HANDLE hProcess, HMODULE hRemoteModule, const std::string&
     }
     CloseHandle(hThread);
     return true;
-}
-
-HMODULE GetAndValidateDllBase(DWORD pid, const std::string& dllPath) {
-    std::string filename = GetFilename(dllPath);
-    HMODULE hRemoteModule = GetDllBase(pid, filename.c_str());
-    if (!hRemoteModule) {
-        std::cerr << "Failed to find base address of module \"" << filename << "\" in target process.\n";
-    }
-    return hRemoteModule;
 }
 
 bool InjectDll(HANDLE hProcess, const std::string& dllPath) {
@@ -145,7 +112,7 @@ bool InjectDll(HANDLE hProcess, const std::string& dllPath) {
 // open a non-existent HKCU key whose name carries the target PID right after InitializeHooks has returned.
 // A kernel registry monitor records it as one RegOpenKey (NAME NOT FOUND) row of the injector process, which
 // marks in its global event order the point from which the target's calls go through the installed hooks.
-void EmitAttachMarker(DWORD targetPid) {
+/* void EmitAttachMarker(DWORD targetPid) {
     char flag[8];
     DWORD len = GetEnvironmentVariableA("HOOKDESIGNER_ATTACH_MARKER", flag, sizeof(flag));
     if (len == 0 || std::string(flag) != "1") {
@@ -157,7 +124,7 @@ void EmitAttachMarker(DWORD targetPid) {
         RegCloseKey(hKey); // the key is not expected to exist, but never leak the handle
     }
     std::cout << "Attach marker: HKCU\\Software\\HookDesignerAttachMarker_" << targetPid << "\n";
-}
+} */
 
 bool ResolveAndValidateDll(std::string& dllPath) {
     char fullPath[MAX_PATH];
@@ -182,7 +149,7 @@ int main(int argc, char* argv[]) {
     std::string dllPath;
 
     auto printUsage = []() {
-        std::cout << "Usage:\n";
+        std::cout << "Usage (ASLR variant):\n";
         std::cout << "  injector.exe <PID> <Path_To_DLL>  (default: inject)\n";
         std::cout << "  injector.exe inject <PID> <Path_To_DLL> (relative or absolute)\n";
         std::cout << "  injector.exe eject <PID> <Path_To_DLL> (relative or absolute)\n";
@@ -235,14 +202,14 @@ int main(int argc, char* argv[]) {
         dllPath = argv[2];
     }
 
-   
+
     if (!ResolveAndValidateDll(dllPath)) {
         return 1;
     }
 
     if (mode == "launch") {
         std::string exePath = argv[2];
-        
+
         std::string cmdLine = "\"" + exePath + "\"";
         for (int i = 4; i < argc; ++i) {
             cmdLine += " ";
@@ -287,10 +254,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "Injection successful. Calling InitializeHooks remotely...\n";
-        HMODULE hRemoteModule = GetAndValidateDllBase(pi.dwProcessId, dllPath);
+        std::cout << "Injection successful. Calling InitializeHooks remotely (ASLR address)...\n";
         DWORD initExitCode = (DWORD)-1;
-        if (!hRemoteModule || !CallRemoteExport(pi.hProcess, hRemoteModule, dllPath, "InitializeHooks", &initExitCode)) {
+        if (!CallRemoteExport(pi.hProcess, dllPath, "InitializeHooks", &initExitCode)) {
             std::cerr << "Error: Failed to execute remote thread for InitializeHooks.\n";
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hProcess);
@@ -299,7 +265,7 @@ int main(int argc, char* argv[]) {
         }
 
         if (initExitCode != 0) {
-            std::cerr << "Error: InitializeHooks failed in target process with code: 0x" 
+            std::cerr << "Error: InitializeHooks failed in target process with code: 0x"
                       << std::hex << initExitCode << "\n";
             TerminateProcess(pi.hProcess, 1);
             CloseHandle(pi.hProcess);
@@ -339,35 +305,38 @@ int main(int argc, char* argv[]) {
             return 1;
         }
 
-        std::cout << "Injection successful. Calling InitializeHooks remotely...\n";
-        HMODULE hRemoteModule = GetAndValidateDllBase(pid, dllPath);
+        std::cout << "Injection successful. Calling InitializeHooks remotely (ASLR address)...\n";
         DWORD initExitCode = (DWORD)-1;
-        if (!hRemoteModule || !CallRemoteExport(hProcess, hRemoteModule, dllPath, "InitializeHooks", &initExitCode)) {
+        if (!CallRemoteExport(hProcess, dllPath, "InitializeHooks", &initExitCode)) {
             std::cerr << "Error: Failed to execute remote thread for InitializeHooks.\n";
             CloseHandle(hProcess);
             return 1;
         }
 
         if (initExitCode != 0) {
-            std::cerr << "Error: InitializeHooks failed in target process with code: 0x" 
+            std::cerr << "Error: InitializeHooks failed in target process with code: 0x"
                       << std::hex << initExitCode << "\n";
             std::cout << "Rolling back injection: unloading DLL from target process...\n";
-            HMODULE hKernel32 = GetModuleHandleA("Kernel32.dll");
-            LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
-            HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
-            if (hThread) {
-                WaitForSingleObject(hThread, 5000);
-                CloseHandle(hThread);
-                std::cout << "DLL successfully unloaded.\n";
+            HMODULE hRemoteModule = (HMODULE)GetAslrRemoteAddress(dllPath); // assumed-equal base, no Toolhelp
+            if (hRemoteModule) {
+                HMODULE hKernel32 = GetModuleHandleA("Kernel32.dll");
+                LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
+                HANDLE hThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pFreeLibrary, (LPVOID)hRemoteModule, 0, NULL);
+                if (hThread) {
+                    WaitForSingleObject(hThread, 5000);
+                    CloseHandle(hThread);
+                    std::cout << "DLL successfully unloaded.\n";
+                }
             }
             CloseHandle(hProcess);
             return 1;
         }
 
         std::cout << "Hooks successfully initialized in target process.\n";
-    
+
     } else if (mode == "eject") {
-        HMODULE hRemoteModule = GetAndValidateDllBase(pid, dllPath);
+        // ASLR variant: the remote base is taken from the injector's own copy of the DLL.
+        HMODULE hRemoteModule = (HMODULE)GetAslrRemoteAddress(dllPath);
         if (!hRemoteModule) {
             CloseHandle(hProcess);
             return 1;
@@ -376,9 +345,9 @@ int main(int argc, char* argv[]) {
         HMODULE hKernel32 = GetModuleHandleA("Kernel32.dll");
         LPVOID pFreeLibrary = (LPVOID)GetProcAddress(hKernel32, "FreeLibrary");
 
-        std::cout << "Calling DeinitializeHooks remotely...\n";
+        std::cout << "Calling DeinitializeHooks remotely (ASLR address)...\n";
         DWORD deinitExitCode = (DWORD)-1;
-        if (!CallRemoteExport(hProcess, hRemoteModule, dllPath, "DeinitializeHooks", &deinitExitCode)) {
+        if (!CallRemoteExport(hProcess, dllPath, "DeinitializeHooks", &deinitExitCode)) {
             std::cerr << "Warning: Failed to call DeinitializeHooks remotely.\n";
         }
 
@@ -386,7 +355,7 @@ int main(int argc, char* argv[]) {
             std::cout << "[WARNING] Hooks successfully detached, but some threads remain blocked inside them, frequent when blocking functions are hooked.\n";
             std::cout << "[WARNING] Skipping FreeLibrary (leaking DLL in target memory) to prevent target crash. Ejection completed.\n";
         } else if (deinitExitCode != 0) {
-            std::cerr << "[ERROR] DeinitializeHooks reported error code: 0x" 
+            std::cerr << "[ERROR] DeinitializeHooks reported error code: 0x"
                       << std::hex << deinitExitCode << ". Skipping FreeLibrary.\n";
         } else {
             std::cout << "Ejecting DLL...\n";

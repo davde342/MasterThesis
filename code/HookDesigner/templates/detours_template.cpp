@@ -43,10 +43,8 @@ static True{{ hook.function_name }}_t True{{ hook.function_name }} = nullptr;
 // Hook Implementations
 {% for hook in hooks %}
 {{ hook.return_type }} {% if hook.calling_convention %}{{ hook.calling_convention }} {% endif %}Hooked{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.type }} {{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%}) {
-    SystemErrorGuard system_error_guard;
-
-    if (TlsGetValue(g_TlsIndex) != 0) {
-        system_error_guard.Restore();
+    // Re-entrant call: checked before SystemErrorGuard, so no destructor overwrites the error state of True<Fn>
+    if (t_InHook) {
         {% if hook.return_type == 'void' %}
         True{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
         return;
@@ -55,7 +53,8 @@ static True{{ hook.function_name }}_t True{{ hook.function_name }} = nullptr;
         {% endif %}
     }
 
-    RecursionHookGuard hook_recursion_guard;
+    SystemErrorGuard system_error_guard;
+    ReEntrancyHookGuard hook_reEntrancy_guard;
     HookActiveThreads hook_active_threads;
     {% include "_hook_body.cpp" %}
 }
@@ -94,12 +93,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     std::vector<HANDLE> threads;
 
     try {
-        g_TlsIndex = TlsAlloc();
-        if (g_TlsIndex == TLS_OUT_OF_INDEXES) {
-            OutputDebugStringA("[CRITICAL] TlsAlloc failed\n");
-            return 0xE0000001;
-        }
-
+        if (g_HooksAttached) return 0;
         {% if has_execution_time %}
         QueryPerformanceFrequency(&g_PerfFrequency);
         {% endif %}
@@ -162,10 +156,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
             {% if telemetry and telemetry.logger == "spdlog" %}
             spdlog::shutdown();
             {% endif %}
-            if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-                TlsFree(g_TlsIndex);
-                g_TlsIndex = TLS_OUT_OF_INDEXES;
-            }
             std::string msg = fmt::format("[CRITICAL] DetourTransactionCommit failed. Error code: {}\n", error);
             OutputDebugStringA(msg.c_str());
             return (DWORD)error;
@@ -174,10 +164,12 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     catch (const std::exception& ex) {
         if (in_transaction) {
             DetourTransactionAbort();
+            for (HANDLE hThread : threads) {
+                CloseHandle(hThread);
+            }
         }
-        for (HANDLE hThread : threads) {
-            CloseHandle(hThread);
-        }
+
+        //Even in case of telemtry init fault, the teardown make the right thing in any case
         {% if telemetry and telemetry.metrics == "prometheus" %}
         g_PromExposer.reset();
         g_PromRegistry.reset();
@@ -185,20 +177,18 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
         {% if telemetry and telemetry.logger == "spdlog" %}
         spdlog::shutdown();
         {% endif %}
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsFree(g_TlsIndex);
-            g_TlsIndex = TLS_OUT_OF_INDEXES;
-        }
-        std::string msg = fmt::format("[CRITICAL] Exception in InitializeHooks: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        // Stack buffer: a heap allocation could throw std::bad_alloc out of the catch block
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[CRITICAL] Exception in InitializeHooks: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
         return 0xE0000002;
     }
     catch (...) {
         if (in_transaction) {
             DetourTransactionAbort();
-        }
-        for (HANDLE hThread : threads) {
-            CloseHandle(hThread);
+            for (HANDLE hThread : threads) {
+                CloseHandle(hThread);
+            }
         }
         {% if telemetry and telemetry.metrics == "prometheus" %}
         g_PromExposer.reset();
@@ -207,10 +197,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
         {% if telemetry and telemetry.logger == "spdlog" %}
         spdlog::shutdown();
         {% endif %}
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsFree(g_TlsIndex);
-            g_TlsIndex = TLS_OUT_OF_INDEXES;
-        }
         OutputDebugStringA("[CRITICAL] SEH/Hardware fault in InitializeHooks\n");
         return 0xE0000003;
     }
@@ -284,11 +270,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
             spdlog::shutdown();
             {% endif %}
 
-            if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-                TlsFree(g_TlsIndex);
-                g_TlsIndex = TLS_OUT_OF_INDEXES;
-            }
-
             OutputDebugStringA("[HOOK] Detours hooks successfully detached and all active threads ejected.\n");
             return 0; // Success
         } else {
@@ -299,20 +280,21 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
     catch (const std::exception& ex) {
         if (in_transaction) {
             DetourTransactionAbort();
+            for (HANDLE hThread : threads) {
+                CloseHandle(hThread);
+            }
         }
-        for (HANDLE hThread : threads) {
-            CloseHandle(hThread);
-        }
-        std::string msg = fmt::format("[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
         return 0xE0000002;
     }
     catch (...) {
         if (in_transaction) {
             DetourTransactionAbort();
-        }
-        for (HANDLE hThread : threads) {
-            CloseHandle(hThread);
+            for (HANDLE hThread : threads) {
+                CloseHandle(hThread);
+            }
         }
         OutputDebugStringA("[CRITICAL] SEH/Hardware fault in DeinitializeHooks\n");
         return 0xE0000003;

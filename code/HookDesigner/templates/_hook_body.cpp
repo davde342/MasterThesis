@@ -18,13 +18,16 @@
         {% endfor %}
         telemetry_inputs_ready = true;
     } catch (const std::exception& ex) {
-        std::string msg = fmt::format("[HOOK CAPTURE] Exception capturing parameter '{}' in {{ hook.function_name }}: {}\n", 
-                                      capturing_input_param ? capturing_input_param : "unknown", ex.what());
-        OutputDebugStringA(msg.c_str());
+        // Handler messages use a stack buffer: a heap allocation could throw std::bad_alloc out of the catch block
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK CAPTURE] Exception capturing parameter '{}' in {{ hook.function_name }}: {}\n",
+                          capturing_input_param ? capturing_input_param : "unknown", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
     } catch (...) {
-        std::string msg = fmt::format("[HOOK CAPTURE] Hardware/SEH fault capturing parameter '{}' in {{ hook.function_name }}\n", 
-                                      capturing_input_param ? capturing_input_param : "unknown");
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK CAPTURE] Hardware/SEH fault capturing parameter '{}' in {{ hook.function_name }}\n",
+                          capturing_input_param ? capturing_input_param : "unknown").out = '\0';
+        OutputDebugStringA(msg);
     }
     {% endif %}
 
@@ -38,8 +41,9 @@
     try {
         {{ "__hook_denied = !" if on_deny else "" }}{{ hook.behaviors.security_policy.pre_hook }}({%- for param in hook.behaviors.security_policy.pre_hook_params -%}{{ param }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
     } catch (const std::exception& ex) {
-        std::string msg = fmt::format("[HOOK EXCEPTION] Exception in pre-hook {{ hook.function_name }}{{ " (call denied)" if on_deny else "" }}: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK EXCEPTION] Exception in pre-hook {{ hook.function_name }}{{ " (call denied)" if on_deny else "" }}: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
     } catch (...) {
         OutputDebugStringA("[HOOK EXCEPTION] Hardware/SEH fault in pre-hook {{ hook.function_name }}{{ " (call denied)" if on_deny else "" }}\n");
     }
@@ -52,8 +56,9 @@
         try {
             {% include "_telemetry_body.cpp" %}
         } catch (const std::exception& ex) {
-            std::string msg = fmt::format("[TELEMETRY EXCEPTION] Exception in telemetry {{ hook.function_name }}: {}\n", ex.what());
-            OutputDebugStringA(msg.c_str());
+            char msg[256];
+            *fmt::format_to_n(msg, sizeof(msg) - 1, "[TELEMETRY EXCEPTION] Exception in telemetry {{ hook.function_name }}: {}\n", ex.what()).out = '\0';
+            OutputDebugStringA(msg);
         } catch (...) {
             OutputDebugStringA("[TELEMETRY EXCEPTION] Hardware/SEH fault in telemetry {{ hook.function_name }}\n");
         }
@@ -80,7 +85,7 @@
         {% endif %}
     } else {
     {% endif %}
-    hook_recursion_guard.Release();
+    hook_reEntrancy_guard.Release();
     {% if hook.is_noreturn %}
     hook_active_threads.Release();
     {% endif %}
@@ -113,15 +118,16 @@
     {% if hook.behaviors.performance_metrics.execution_time %}
     {% endif %}
     system_error_guard.Capture();
-    hook_recursion_guard.Acquire();
+    hook_reEntrancy_guard.Acquire();
 
     {% if hook.behaviors.security_policy.post_hook %}
     // Post-logic execution
     try {
         {{ hook.behaviors.security_policy.post_hook }}({%- for param in hook.behaviors.security_policy.post_hook_params -%}{%- if param in ['result', '__hook_result'] -%}__hook_result{%- else -%}{{ param }}{%- endif -%}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
     } catch (const std::exception& ex) {
-        std::string msg = fmt::format("[HOOK EXCEPTION] Exception in post-hook {{ hook.function_name }}: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK EXCEPTION] Exception in post-hook {{ hook.function_name }}: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
     } catch (...) {
         OutputDebugStringA("[HOOK EXCEPTION] Hardware/SEH fault in post-hook {{ hook.function_name }}\n");
     }
@@ -148,13 +154,15 @@
         {% endfor %}
         telemetry_outputs_ready = true;
     } catch (const std::exception& ex) {
-        std::string msg = fmt::format("[HOOK CAPTURE] Exception capturing output parameter '{}' in {{ hook.function_name }}: {}\n", 
-                                      capturing_output_param ? capturing_output_param : "unknown", ex.what());
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK CAPTURE] Exception capturing output parameter '{}' in {{ hook.function_name }}: {}\n",
+                          capturing_output_param ? capturing_output_param : "unknown", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
     } catch (...) {
-        std::string msg = fmt::format("[HOOK CAPTURE] Hardware/SEH fault capturing output parameter '{}' in {{ hook.function_name }}\n", 
-                                      capturing_output_param ? capturing_output_param : "unknown");
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[HOOK CAPTURE] Hardware/SEH fault capturing output parameter '{}' in {{ hook.function_name }}\n",
+                          capturing_output_param ? capturing_output_param : "unknown").out = '\0';
+        OutputDebugStringA(msg);
     }
     {% endif %}
 
@@ -169,8 +177,9 @@
         try {
             {% include "_telemetry_body.cpp" %}
         } catch (const std::exception& ex) {
-            std::string msg = fmt::format("[TELEMETRY EXCEPTION] Exception in telemetry {{ hook.function_name }}: {}\n", ex.what());
-            OutputDebugStringA(msg.c_str());
+            char msg[256];
+            *fmt::format_to_n(msg, sizeof(msg) - 1, "[TELEMETRY EXCEPTION] Exception in telemetry {{ hook.function_name }}: {}\n", ex.what()).out = '\0';
+            OutputDebugStringA(msg);
         } catch (...) {
             OutputDebugStringA("[TELEMETRY EXCEPTION] Hardware/SEH fault in telemetry {{ hook.function_name }}\n");
         }

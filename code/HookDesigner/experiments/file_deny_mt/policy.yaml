@@ -1,0 +1,61 @@
+# file restriction, multi-thread variant, run A
+#
+# run A plus one Prometheus counter per hook: the opens_total
+
+configure:
+  paradigm: inline_hook
+  engines:
+    - detours
+    - frida
+  process: "filedeny_mt_target.exe"
+  logic_file: "../file_deny/logic.cpp"
+  telemetry:
+    logger: "spdlog"
+    logger_config:
+      type: "file"
+      file: "hook.log"
+      level: "info"
+    metrics: "prometheus"
+    metrics_config:
+      endpoint: "127.0.0.1:8085"
+
+hooks:
+  - module: ntdll.dll
+    function_name: NtCreateFile
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        counters:
+          - name: "opens_total"
+            description: "Calls to NtCreateFile, by verdict of the policy"
+            label:
+              verdict: '__hook_denied ? "denied" : "allowed"'
+      log_rules:
+        - name: "deny"
+          condition: "__hook_denied"
+          format: "EVENT|deny|fn=NtCreateFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}|last_error=0x{GetLastError():x}"
+      security_policy:
+        pre_hook: CheckFileAllowed
+        on_deny:
+          return_value: "STATUS_ACCESS_DENIED"
+
+  - module: ntdll.dll
+    function_name: NtOpenFile
+    address_resolution:
+      strategy: export
+    behaviors:
+      performance_metrics:
+        counters:
+          - name: "opens_total"
+            description: "Calls to NtOpenFile, by verdict of the policy"
+            label:
+              verdict: '__hook_denied ? "denied" : "allowed"'
+      log_rules:
+        - name: "deny"
+          condition: "__hook_denied"
+          format: "EVENT|deny|fn=NtOpenFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}|last_error=0x{GetLastError():x}"
+      security_policy:
+        pre_hook: CheckFileAllowed
+        on_deny:
+          return_value: "STATUS_ACCESS_DENIED"

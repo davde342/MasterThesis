@@ -12,6 +12,7 @@
 #include <atomic>
 #include <vector>
 #include <string>
+#include <stdexcept>
 
 {% set has_noreturn = hooks | selectattr('is_noreturn') | list | length > 0 %}
 
@@ -44,10 +45,8 @@ static gpointer target_{{ hook.function_name }} = nullptr;
 // Hook Implementations
 {% for hook in hooks %}
 {{ hook.return_type }} {% if hook.calling_convention %}{{ hook.calling_convention }} {% endif %}Hooked{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.type }} {{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%}) {
-    SystemErrorGuard system_error_guard;
-
-    if (TlsGetValue(g_TlsIndex) != 0) {
-        system_error_guard.Restore();
+    // Re-entrant call: checked before SystemErrorGuard, so no destructor overwrites the error state of True<Fn>
+    if (t_InHook) {
         {% if hook.return_type == 'void' %}
         True{{ hook.function_name }}({%- for param in hook.parameters -%}{{ param.name }}{%- if not loop.last -%}, {%- endif -%}{%- endfor -%});
         return;
@@ -56,7 +55,8 @@ static gpointer target_{{ hook.function_name }} = nullptr;
         {% endif %}
     }
 
-    RecursionHookGuard hook_recursion_guard;
+    SystemErrorGuard system_error_guard;
+    ReEntrancyHookGuard hook_reEntrancy_guard;
     {% if hook.is_noreturn %}
     HookActiveThreads hook_active_threads;
     {% endif %}
@@ -71,12 +71,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     bool in_transaction = false;
 
     try {
-        g_TlsIndex = TlsAlloc();
-        if (g_TlsIndex == TLS_OUT_OF_INDEXES) {
-            OutputDebugStringA("[CRITICAL] TlsAlloc failed\n");
-            return 0xE0000001;
-        }
-
+        if (g_HooksAttached) return 0;
         {% if has_execution_time %}
         QueryPerformanceFrequency(&g_PerfFrequency);
         {% endif %}
@@ -122,9 +117,9 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
                                     nullptr,
                                     (gpointer*)&True{{ hook.function_name }});
             {% endif %}
+            // Gum reports failures only through the return code; throwing routes them into the catch rollback.
             if (r != GUM_REPLACE_OK) {
-                std::string msg = fmt::format("[CRITICAL] Frida failed to replace function '{}'. Error code: {}\n", "{{ hook.function_name }}", (int)r);
-                OutputDebugStringA(msg.c_str());
+                throw std::runtime_error(fmt::format("Frida failed to replace function '{}'. Error code: {}", "{{ hook.function_name }}", (int)r));
             }
         }
         {% endfor %}
@@ -139,13 +134,13 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
     }
     catch (const std::exception& ex) {
         if (in_transaction && interceptor) {
+            // True<Fn> is set only by a successful replace, so this reverts exactly the staged hooks
             {% for hook in hooks %}
-            if (target_{{ hook.function_name }}) {
+            if (True{{ hook.function_name }}) {
                 gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
             }
             {% endfor %}
             gum_interceptor_end_transaction(interceptor);
-            in_transaction = false;
         }
         if (interceptor) {
             g_object_unref(interceptor);
@@ -159,24 +154,15 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
         {% if telemetry and telemetry.logger == "spdlog" %}
         spdlog::shutdown();
         {% endif %}
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsFree(g_TlsIndex);
-            g_TlsIndex = TLS_OUT_OF_INDEXES;
-        }
-        std::string msg = fmt::format("[CRITICAL] Exception in InitializeHooks: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        // Stack buffer: a heap allocation could throw std::bad_alloc out of the catch block
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[CRITICAL] Exception in InitializeHooks: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
         return 0xE0000002;
     }
     catch (...) {
-        if (in_transaction && interceptor) {
-            {% for hook in hooks %}
-            if (target_{{ hook.function_name }}) {
-                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
-            }
-            {% endfor %}
-            gum_interceptor_end_transaction(interceptor);
-            in_transaction = false;
-        }
+        // No revert/end_transaction: a fault inside replace leaves its nested transaction open, so nothing can commit,
+        // and gum_deinit_embedded discards the staged hooks without writing them.
         if (interceptor) {
             g_object_unref(interceptor);
             interceptor = nullptr;
@@ -189,10 +175,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
         {% if telemetry and telemetry.logger == "spdlog" %}
         spdlog::shutdown();
         {% endif %}
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsFree(g_TlsIndex);
-            g_TlsIndex = TLS_OUT_OF_INDEXES;
-        }
         OutputDebugStringA("[CRITICAL] SEH/Hardware fault in InitializeHooks\n");
         return 0xE0000003;
     }
@@ -201,7 +183,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI InitializeHooks(LPVOID lpParam) {
 
 
 extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) {
-    bool in_transaction = false;
+    
 
     try {
         if (g_Ejected || !interceptor) return 0;
@@ -214,7 +196,7 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
 
             // 2. Revert hooks so no new API calls enter telemetry logic
             gum_interceptor_begin_transaction(interceptor);
-            in_transaction = true;
+            
 
             {% for hook in hooks %}
             if (target_{{ hook.function_name }} != nullptr) {
@@ -223,7 +205,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
             {% endfor %}
 
             gum_interceptor_end_transaction(interceptor);
-            in_transaction = false;
 
             g_HooksAttached = false; // Hooks are now detached/reverted
         }
@@ -263,11 +244,6 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
                 gum_deinit_embedded();
             }
 
-            if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-                TlsFree(g_TlsIndex);
-                g_TlsIndex = TLS_OUT_OF_INDEXES;
-            }
-
             OutputDebugStringA("[HOOK] Frida-Gum hooks successfully detached and all active threads ejected.\n");
             return 0; // Success
         } else {
@@ -275,30 +251,17 @@ extern "C" __declspec(dllexport) DWORD WINAPI DeinitializeHooks(LPVOID lpParam) 
             return 1; // Leaked DLL warning
         }
     }
+    // Normally revert never reads target memory.
+    // It only updates Gum's own tables: it clears
+    //replacement_function, removes the context from function_by_address and
+    //schedules the deactivation
     catch (const std::exception& ex) {
-        if (in_transaction && interceptor) {
-            {% for hook in hooks %}
-            if (target_{{ hook.function_name }} != nullptr) {
-                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
-            }
-            {% endfor %}
-            gum_interceptor_end_transaction(interceptor);
-            in_transaction = false;
-        }
-        std::string msg = fmt::format("[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what());
-        OutputDebugStringA(msg.c_str());
+        char msg[256];
+        *fmt::format_to_n(msg, sizeof(msg) - 1, "[CRITICAL] Exception in DeinitializeHooks: {}\n", ex.what()).out = '\0';
+        OutputDebugStringA(msg);
         return 0xE0000002;
     }
     catch (...) {
-        if (in_transaction && interceptor) {
-            {% for hook in hooks %}
-            if (target_{{ hook.function_name }} != nullptr) {
-                gum_interceptor_revert(interceptor, target_{{ hook.function_name }});
-            }
-            {% endfor %}
-            gum_interceptor_end_transaction(interceptor);
-            in_transaction = false;
-        }
         OutputDebugStringA("[CRITICAL] SEH/Hardware fault in DeinitializeHooks\n");
         return 0xE0000003;
     }

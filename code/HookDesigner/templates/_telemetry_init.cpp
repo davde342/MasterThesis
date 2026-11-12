@@ -1,9 +1,7 @@
 
     {% if telemetry.logger == "spdlog" %}
     spdlog::init_thread_pool(65536, 1, []() {
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsSetValue(g_TlsIndex, (LPVOID)1);
-        }
+        t_InHook = true; // calls made by the logger thread go straight to the original functions
     });
 
     spdlog::sink_ptr sink;
@@ -40,9 +38,7 @@
     g_PromRegistry = std::make_shared<prometheus::Registry>();
     CivetCallbacks callbacks{};
     callbacks.init_thread = [](const struct mg_context*, int) -> void* {
-        if (g_TlsIndex != TLS_OUT_OF_INDEXES) {
-            TlsSetValue(g_TlsIndex, (LPVOID)1);
-        }
+        t_InHook = true; // same for the CivetWeb server threads
         return nullptr;
     };
     g_PromExposer = std::make_unique<prometheus::Exposer>("{{ telemetry.metrics_config.endpoint }}", 2, &callbacks);

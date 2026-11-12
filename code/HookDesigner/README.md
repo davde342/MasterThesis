@@ -144,7 +144,7 @@ injector.exe <PID> <DLL_PATH>
 
 3. **Thread-Safe Ejection & Memory Leak Safety Fallback**: When ejecting a DLL (`injector.exe eject`), target threads might remain executing inside hooked callback functions or blocked on the target function (frequent with blocking functions, e.g. `recv()`, `Sleep()`, `WaitForSingleObject()`). Ejection is handled via a 2-tier safety mechanism:
    - **Hook Teardown & Spin-Wait Timeout**: Inside the Hook DLL, `DeinitializeHooks` immediately reverts all active hooks so no new threads enter hook routines. It then enters a 2-second spin-wait loop checking if active threads inside hook bodies reach zero.
-     - **Clean Exit (`TRUE`)**: If all threads exit within 2 seconds, logger/metrics registries (`spdlog::shutdown()`, Prometheus) and TLS indexes are cleanly freed, and `DeinitializeHooks` returns `TRUE` (`1`).
+     - **Clean Exit (`TRUE`)**: If all threads exit within 2 seconds, logger/metrics registries (`spdlog::shutdown()`, Prometheus) are cleanly freed, and `DeinitializeHooks` returns `TRUE` (`1`).
      - **Ejection Failure (`FALSE`)**: If threads remain trapped in hook routines after 2 seconds, `DeinitializeHooks` skips logger/metrics destruction (preventing crash access violations for threads still running logging logic), logs a warning via `OutputDebugStringA`, and returns `FALSE` (`0`).
    - **Injector Fallback Strategy**: Upon receiving `FALSE` from `DeinitializeHooks`, the injector logs a warning and **deliberately skips calling `FreeLibrary`**. Leaking the DLL in target memory prevents the target process from access violation crashes if blocked threads eventually unblock and attempt to execute code in unmapped memory.
 
@@ -517,14 +517,13 @@ The template for the Microsoft Detours engine. It generates a self-contained C++
 - **Hooking Paradigm**: Uses Microsoft Detours' inline prologue patching mechanism (`DetourAttach` / `DetourDetach`). Overwrites the first 5+ bytes of the target API function prologue with a relative `JMP` instruction to `Hooked<FunctionName>`, allocating a trampoline stub (`True<FunctionName>`) containing the original prologue instructions and a jump back to the real function.
 
 - **Attaching Procedure (`InitializeHooks()`)**:
-  1. Allocates a Thread Local Storage (TLS) index via `TlsAlloc()` for recursion guarding (`RecursionHookGuard`).
-  2. Initializes telemetry globals and metrics servers via `_telemetry_init.cpp`.
-  3. Resolves target function virtual addresses using module handle lookup and `GetProcAddress`.
-  4. Enumerate process worker threads via `EnlistAllThreads()` (using `CreateToolhelp32Snapshot`).
-  5. Opens a Detours transaction via `DetourTransactionBegin()`.
-  6. Registers all worker threads with `DetourUpdateThread()`.
-  7. Attaches each target function via `DetourAttach(&(PVOID&)True<FunctionName>, Hooked<FunctionName>)`.
-  8. Commits the transaction with `DetourTransactionCommit()` and closes thread handles.
+  1. Initializes telemetry globals and metrics servers via `_telemetry_init.cpp`.
+  2. Resolves target function virtual addresses using module handle lookup and `GetProcAddress`.
+  3. Enumerate process worker threads via `EnlistAllThreads()` (using `CreateToolhelp32Snapshot`).
+  4. Opens a Detours transaction via `DetourTransactionBegin()`.
+  5. Registers all worker threads with `DetourUpdateThread()`.
+  6. Attaches each target function via `DetourAttach(&(PVOID&)True<FunctionName>, Hooked<FunctionName>)`.
+  7. Commits the transaction with `DetourTransactionCommit()` and closes thread handles.
 
 - **Detaching Procedure (`DeinitializeHooks()`)**:
   1. Stops background HTTP metric servers (`g_PromExposer.reset()`) to terminate active web worker threads cleanly.
@@ -534,7 +533,7 @@ The template for the Microsoft Detours engine. It generates a self-contained C++
 
 - **Thread Safety & Ejection Synchronization**:
   - **Attach/Detach Thread Safety**: Uses `EnlistAllThreads()` combined with `DetourUpdateThread()` to pause and adjust worker thread execution states during prologue byte modification.
-  - **Ejection Guard**: Every hook wrapper unconditionally instantiates a `HookActiveThreads` RAII counter on entry, which atomically increments `activeThreads` on construction and decrements it on destruction. During `DeinitializeHooks()`, after detaching API hooks, the DLL executes a 2-second spin-wait loop checking `activeThreads.load() == 0` (to avoid DLL unload while worker threads are still within the hook logic). Once confirmed zero, telemetry loggers (`spdlog::shutdown()`) and TLS slots are safely destroyed before DLL unloading.
+  - **Ejection Guard**: Every hook wrapper unconditionally instantiates a `HookActiveThreads` RAII counter on entry, which atomically increments `activeThreads` on construction and decrements it on destruction. During `DeinitializeHooks()`, after detaching API hooks, the DLL executes a 2-second spin-wait loop checking `activeThreads.load() == 0` (to avoid DLL unload while worker threads are still within the hook logic). Once confirmed zero, telemetry loggers (`spdlog::shutdown()`) are safely destroyed before DLL unloading.
 
 #### `frida_template.cpp`
 
@@ -543,14 +542,13 @@ The top-level template for the Frida-Gum engine. Utilizes Frida's dynamic binary
 - **Hooking Paradigm**: Uses Frida-Gum dynamic code allocation and interceptor replacement (`gum_init_embedded()`, `GumInterceptor`). It supports dual attaching modes based on the function return policy (`is_noreturn`).
 
 - **Attaching Procedure (`InitializeHooks()`)**:
-  1. Allocates a TLS index via `TlsAlloc()` for recursion guarding (same as Detours).
-  2. Initializes telemetry globals, initializes embedded Frida-Gum (`gum_init_embedded()`), and obtains a `GumInterceptor` handle via `gum_interceptor_obtain()`.
-  3. Resolves target function addresses.
-  4. Opens an atomic Frida transaction via `gum_interceptor_begin_transaction(interceptor)`.
-  5. Replaces target functions based on return behavior:
+  1. Initializes telemetry globals, initializes embedded Frida-Gum (`gum_init_embedded()`), and obtains a `GumInterceptor` handle via `gum_interceptor_obtain()`.
+  2. Resolves target function addresses.
+  3. Opens an atomic Frida transaction via `gum_interceptor_begin_transaction(interceptor)`.
+  4. Replaces target functions based on return behavior:
      - **Standard Functions** (`is_noreturn: false`): Calls `gum_interceptor_replace()`, enabling Frida's invocation listener stack tracking for thread ejection via `gum_interceptor_flush()`.
      - **Non-Returning Functions** (`is_noreturn: true`, e.g. `ExitProcess`, `ExitThread`, `RaiseException`): Calls `gum_interceptor_replace_fast()`. Standard `gum_interceptor_replace()` pushes an invocation frame on entry and expects to pop it on function exit; because non-returning functions never return, Frida's listener frame is never popped, which would cause `gum_interceptor_flush()` to hang indefinitely or fail. Using `gum_interceptor_replace_fast()` bypasses Frida's invocation listener stack, adopting a direct replacement model (similar to Detours) that relies on the `HookActiveThreads` RAII counter instead.
-  6. Commits the transaction via `gum_interceptor_end_transaction(interceptor)`, applying all trampoline modifications atomically.
+  5. Commits the transaction via `gum_interceptor_end_transaction(interceptor)`, applying all trampoline modifications atomically.
 
 - **Detaching Procedure (`DeinitializeHooks()`)**:
   1. Stops background HTTP metric servers (`g_PromExposer.reset()`).
@@ -566,12 +564,12 @@ Generates the body of each `Hooked<FunctionName>` function wrapper. Included onc
 
 1. **Argument capture on entry**: Captures parameter values referenced in telemetry expressions before invoking the original function. Standalone parameter references are accessed as `input_<parameter_name>` (using `ReadPointer` for pointer types, `CopyString` for string pointers or `CopyUnicodeString` for `PUNICODE_STRING`).
 2. **Pre-hook invocation**: Calls user `pre_hook` callback within `try { ... } catch (...)` exception blocks. For hooks with `on_deny`, its `bool` result sets `__hook_denied` (`true` before the call, so a pre-hook that throws or faults denies the call: fail-closed).
-   - **Deny branch** (hooks with `on_deny` only): when `__hook_denied` is `true`, steps 3–8 are skipped. `__hook_result` is set to `on_deny.return_value`, and the caller's last error to `on_deny.last_error` when declared (by writing the guard's `win32_error`, which its destructor returns to the caller). `__hook_latency` is 0. The recursion guard stays held, since there is no original call to release it around. Telemetry (steps 9–10) runs as for allowed calls.
-3. **Recursion, thread, and error guard release**: Releases `hook_recursion_guard` (and `hook_active_threads` for non-returning functions) and calls `system_error_guard.Restore()` to ensure the original target function sees the pristine incoming caller error state.
+   - **Deny branch** (hooks with `on_deny` only): when `__hook_denied` is `true`, steps 3–8 are skipped. `__hook_result` is set to `on_deny.return_value`, and the caller's last error to `on_deny.last_error` when declared (by writing the guard's `win32_error`, which its destructor returns to the caller). `__hook_latency` is 0. The ReEntrancy guard stays held, since there is no original call to release it around. Telemetry (steps 9–10) runs as for allowed calls.
+3. **ReEntrancy, thread, and error guard release**: Releases `hook_ReEntrancy_guard` (and `hook_active_threads` for non-returning functions) and calls `system_error_guard.Restore()` to ensure the original target function sees the pristine incoming caller error state.
 4. **Performance timing start**: Queries `QueryPerformanceCounter(&start_time_...)` immediately prior to target invocation if `execution_time` is enabled.
 5. **Original function call**: Calls `True<FunctionName>(...)` via the trampoline pointer, capturing the return value in `__hook_result`.
 6. **Performance timing end & error snapshot**: Queries `QueryPerformanceCounter(&end_time_...)` immediately after returning and computes elapsed milliseconds latency, then snapshots the target's error state via `system_error_guard.Capture()`. The snapshot follows the end timestamp so that the timed window contains only the original function, symmetric with step 3, where `Restore()` precedes the start timestamp. This is safe because `QueryPerformanceCounter` modifies neither `GetLastError()` nor `errno`.
-7. **Recursion guard re-acquisition**: Re-acquires `hook_recursion_guard` to protect post-execution logic and telemetry routines from re-entrant callbacks.
+7. **ReEntrancy guard re-acquisition**: Re-acquires `hook_ReEntrancy_guard` to protect post-execution logic and telemetry routines from re-entrant callbacks.
 8. **Post-hook invocation**: Calls user `post_hook` callback within structured exception handling. The error state returned to the caller was captured in step 6, right after the original call, so the post-hook cannot change it.
 9. **Argument capture on exit**: Re-captures parameters if referenced (`output_<parameter_name>`).
 10. **Telemetry execution**: Includes `_telemetry_body.cpp` to evaluate log rules and record Prometheus metrics (any side-effect error state modifications are safely quarantined).
@@ -607,7 +605,7 @@ Generates runtime telemetry evaluation logic inside each `Hooked<FunctionName>` 
 Provides utility functions and SEH-protected wrappers included at the top of every generated file:
 
 - `#include "{{ logic_file_rel }}"` — includes the user's logic file. It is emitted **last**, after every helper below, so user logic (helpers, pre/post hook bodies) can call `CopyString`, `CopyUnicodeString` and `ReadPointer`. A user-defined function with one of these names would therefore collide with the framework's.
-- `RecursionHookGuard` — TLS-based thread guard to prevent re-entrant hook loops.
+- `ReEntrancyHookGuard` — RAII guard over the `thread_local` flag `t_InHook`; it prevents re-entrant hook loops. Every wrapper checks the flag **before** constructing `SystemErrorGuard`, so a re-entrant call goes straight to `True<Fn>` and its error state is not overwritten. The flag keeps a constant initializer: in a DLL loaded with `LoadLibrary`, dynamic initialization of a `thread_local` does not run on threads that already exist.
 - `HookActiveThreads` — RAII thread tracking counter (`activeThreads`) for safe ejection.
 - `SystemErrorGuard` — RAII system error guard preserving Windows `GetLastError()` and CRT `errno` across pre/post logic, string conversions, and telemetry emissions. errno belongs to a CRT instance: the preservation reaches the target's errno only when the hook DLL shares the target's CRT (`--rt-link /MD` with a target that uses the shared `ucrtbase.dll`); with the default `/MT` the DLL has its own CRT, so the guard covers only the DLL's own errno, which the target never reads.
 - `CopyString` — safe string copy helper using SIMD `strnlen` to inspect `char*` pointers up to a max length without crash risks; memory access violations are caught by `/EHa` structured exception handling.

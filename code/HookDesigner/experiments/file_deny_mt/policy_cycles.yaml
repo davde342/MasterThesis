@@ -1,12 +1,14 @@
-# file restriction
+# file restriction, multi-thread variant, run B
 
+# Run A's policy (policy.yaml) without the Prometheus counter.
 
 configure:
   paradigm: inline_hook
   engines:
     - detours
-  process: "filedeny_target.exe"
-  logic_file: "logic.cpp"
+    - frida
+  process: "filedeny_mt_target.exe"
+  logic_file: "../file_deny/logic.cpp"
   telemetry:
     logger: "spdlog"
     logger_config:
@@ -23,7 +25,7 @@ hooks:
       log_rules:
         - name: "deny"
           condition: "__hook_denied"
-          format: "EVENT|deny|fn=NtCreateFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}"
+          format: "EVENT|deny|fn=NtCreateFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}|last_error=0x{GetLastError():x}"
       security_policy:
         pre_hook: CheckFileAllowed
         on_deny:
@@ -37,7 +39,7 @@ hooks:
       log_rules:
         - name: "deny"
           condition: "__hook_denied"
-          format: "EVENT|deny|fn=NtOpenFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}"
+          format: "EVENT|deny|fn=NtOpenFile|pid={GetCurrentProcessId()}|tid={__hook_tid}|root=0x{ObjectRoot(input_ObjectAttributes):x}|name={CopyObjectName(input_ObjectAttributes)}|status=0x{(ULONG)__hook_result:x}|last_error=0x{GetLastError():x}"
       security_policy:
         pre_hook: CheckFileAllowed
         on_deny:
